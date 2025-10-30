@@ -3,3 +3,4 @@ pyrogram>=2.0.0
 TGCrypto
 uvicorn
 starlette
+aiohttp
