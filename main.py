@@ -30,7 +30,7 @@ async def startup():
     
     logging.info(f"Setting webhook to {WEBHOOK_URL}...")
     try:
-        # ম্যানুয়ালি Webhook সেট করা (আগের ধাপের সঠিক কোড)
+        # ম্যানুয়ালি Webhook সেট করা
         async with aiohttp.ClientSession() as session:
             response = await session.get(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}"
@@ -53,22 +53,30 @@ async def shutdown():
 async def webhook_handler(request: Request):
     """
     টেলিগ্রাম থেকে আসা সব আপডেট এখানে আসবে
-    (সঠিক মেথড 'handle_update' ব্যবহার করে)
+    (সঠিক মেথড 'process_update' ব্যবহার করে)
     """
     try:
-        # --- মূল পরিবর্তন এখানে ---
-        # 'feed_update'-এর বদলে 'handle_update' ব্যবহার করা হয়েছে
-        await app.handle_update(await request.json())
-        # --- পরিবর্তন শেষ ---
+        # --- মূল সমাধান এখানে ---
+        # 'handle_update'-এর বদলে 'process_update' ব্যবহার করা হয়েছে
+        data = await request.json()
+        await app.process_update(data)
+        # --- সমাধান শেষ ---
+
+    except AttributeError:
+        # যদি 'process_update' মেথডটি না পাওয়া যায় (খুব পুরানো ভার্সন)
+        logging.error("="*50)
+        logging.error("CRITICAL: 'Client' object has no attribute 'process_update'.")
+        logging.error("Please update Pyrogram immediately!")
+        logging.error("Run in your terminal: pip install -U pyrogram")
+        logging.error("="*50)
     except Exception as e:
-        # এটিই সেই এরর যা আপনি আগে পেয়েছিলেন, এখন এটি ঠিক করা হয়েছে
         logging.error(f"Webhook handler error: {e}")
     
     return Response(status_code=200)
 
 async def health_check(request: Request):
     """Render-কে জানানোর জন্য যে সার্ভার চালু আছে"""
-    return PlainTextResponse("Bot is running (Webhook Mode)!")
+    return PlainTextResponse("Bot is running (Webhook Mode - Final Fix)!")
 
 # রুট বা URL গুলো ডিফাইন করুন
 routes = [
