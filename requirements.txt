@@ -1,4 +1,4 @@
 Flask
-​gunicorn
-​pyrogram>=2.0.0
+gunicorn
+pyrogram>=2.0.0
 TGCrypto
