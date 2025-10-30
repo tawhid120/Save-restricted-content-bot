@@ -7,6 +7,9 @@ from starlette.requests import Request
 from starlette.responses import Response, PlainTextResponse
 from starlette.routing import Route
 
+# pyrogram.types থেকে Update ইম্পোর্ট করুন
+from pyrogram.types import Update
+
 # bot.py ফাইল থেকে app এবং BOT_TOKEN ইম্পোর্ট করুন
 try:
     from bot import app, BOT_TOKEN
@@ -53,18 +56,21 @@ async def shutdown():
 async def webhook_handler(request: Request):
     """
     টেলিগ্রাম থেকে আসা সব আপডেট এখানে আসবে
-    (সঠিক মেথড 'process_update' ব্যবহার করে)
+    (সঠিক Pyrogram পদ্ধতি ব্যবহার করে)
     """
     try:
+        # --- মূল সমাধান এখানে ---
+        # 1. রিকোয়েস্ট থেকে JSON ডেটা (dict) নিন
         data = await request.json()
-        await app.process_update(data)
 
-    except AttributeError as e:
-        # যদি কোনো কারণে Pyrogram v2 ইন্সটল না হয়, তবে এই এররটি লগ হবে
-        logging.error("="*50)
-        logging.error(f"CRITICAL: {e}")
-        logging.error("Pyrogram version is still old! Check requirements.txt")
-        logging.error("="*50)
+        # 2. JSON dict-কে Pyrogram-এর Update অবজেক্টে পরিণত করুন
+        #    Update.read() হলো সঠিক মেথড
+        update_obj = await Update.read(app, data)
+
+        # 3. Update অবজেক্টটিকে app.dispatcher-এ feed করুন
+        await app.dispatcher.feed_update(update_obj)
+        # --- সমাধান শেষ ---
+
     except Exception as e:
         logging.error(f"Webhook handler error: {e}")
     
@@ -72,7 +78,7 @@ async def webhook_handler(request: Request):
 
 async def health_check(request: Request):
     """Render-কে জানানোর জন্য যে সার্ভার চালু আছে"""
-    return PlainTextResponse("Bot is running (Webhook Mode - Final Fix)!")
+    return PlainTextResponse("Bot is running (Webhook - Dispatcher Fix)!")
 
 # রুট বা URL গুলো ডিফাইন করুন
 routes = [
