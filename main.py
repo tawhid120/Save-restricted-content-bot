@@ -56,18 +56,14 @@ async def webhook_handler(request: Request):
     (সঠিক মেথড 'process_update' ব্যবহার করে)
     """
     try:
-        # --- মূল সমাধান এখানে ---
-        # 'handle_update'-এর বদলে 'process_update' ব্যবহার করা হয়েছে
         data = await request.json()
         await app.process_update(data)
-        # --- সমাধান শেষ ---
 
-    except AttributeError:
-        # যদি 'process_update' মেথডটি না পাওয়া যায় (খুব পুরানো ভার্সন)
+    except AttributeError as e:
+        # যদি কোনো কারণে Pyrogram v2 ইন্সটল না হয়, তবে এই এররটি লগ হবে
         logging.error("="*50)
-        logging.error("CRITICAL: 'Client' object has no attribute 'process_update'.")
-        logging.error("Please update Pyrogram immediately!")
-        logging.error("Run in your terminal: pip install -U pyrogram")
+        logging.error(f"CRITICAL: {e}")
+        logging.error("Pyrogram version is still old! Check requirements.txt")
         logging.error("="*50)
     except Exception as e:
         logging.error(f"Webhook handler error: {e}")
