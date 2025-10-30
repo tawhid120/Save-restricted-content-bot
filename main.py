@@ -7,8 +7,6 @@ from starlette.requests import Request
 from starlette.responses import Response, PlainTextResponse
 from starlette.routing import Route
 
-# pyrogram.types থেকে Update ইম্পোর্ট করার আর প্রয়োজন নেই
-
 # bot.py ফাইল থেকে app এবং BOT_TOKEN ইম্পোর্ট করুন
 try:
     from bot import app, BOT_TOKEN
@@ -58,14 +56,10 @@ async def webhook_handler(request: Request):
     (সঠিক Pyrogram পদ্ধতি 'feed_raw_update' ব্যবহার করে)
     """
     try:
-        # --- মূল সমাধান এখানে ---
-        # 1. রিকোয়েস্ট থেকে JSON ডেটা (dict) নিন
         data = await request.json()
-
-        # 2. JSON dict-টিকে সরাসরি app.dispatcher.feed_raw_update-এ দিন
-        #    এটিই টেলিগ্রাম থেকে আসা रॉ (raw) ডেটা প্রসেস করার সঠিক মেথড।
+        
+        # এটিই Pyrogram v2.0.106-এর সঠিক মেথড
         await app.dispatcher.feed_raw_update(data)
-        # --- সমাধান শেষ ---
 
     except Exception as e:
         logging.error(f"Webhook handler error: {e}")
@@ -74,7 +68,7 @@ async def webhook_handler(request: Request):
 
 async def health_check(request: Request):
     """Render-কে জানানোর জন্য যে সার্ভার চালু আছে"""
-    return PlainTextResponse("Bot is running (Webhook - Final Fix v2)!")
+    return PlainTextResponse("Bot is running (Webhook - Final Fix v3)!")
 
 # রুট বা URL গুলো ডিফাইন করুন
 routes = [
