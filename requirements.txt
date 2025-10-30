@@ -1,5 +1,5 @@
 gunicorn
-pyrogram>=2.0.0
+pyrogram>=2.0.106
 TGCrypto
 uvicorn
 starlette
