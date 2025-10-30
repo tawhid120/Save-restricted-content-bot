@@ -1,6 +1,7 @@
 import os
 import logging
 import uvicorn
+import aiohttp  # এটি ইম্পোর্ট করা হয়েছে
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response, PlainTextResponse
@@ -23,15 +24,27 @@ if not RENDER_URL:
 WEBHOOK_URL = f"{RENDER_URL}/{BOT_TOKEN}"
 
 async def startup():
-    """সার্ভার চালু হওয়ার সময় এটি চলবে"""
+    """সার্ভার চালু হওয়ার সময় এটি চলবে (আপনার সমাধান সহ)"""
     logging.info("Starting Pyrogram client...")
     await app.start()
+    
     logging.info(f"Setting webhook to {WEBHOOK_URL}...")
     try:
-        await app.set_webhook(WEBHOOK_URL)
-        logging.info("Webhook set successfully. Bot is ready.")
+        # --- আপনার দেওয়া সমাধান ---
+        async with aiohttp.ClientSession() as session:
+            response = await session.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}"
+            )
+            data = await response.json()
+            if not data.get("ok"):
+                logging.error(f"Failed to set webhook: {data}")
+            else:
+                logging.info("Webhook set successfully.")
+        # --- সমাধান শেষ ---
+        logging.info("Bot is ready.")
+        
     except Exception as e:
-        logging.error(f"Failed to set webhook: {e}")
+        logging.error(f"Webhook setup failed during startup: {e}")
 
 async def shutdown():
     """সার্ভার বন্ধ হওয়ার সময় এটি চলবে"""
@@ -41,17 +54,15 @@ async def shutdown():
 async def webhook_handler(request: Request):
     """টেলিগ্রাম থেকে আসা সব আপডেট এখানে আসবে"""
     try:
-        # রিকোয়েস্ট থেকে JSON ডেটা নিন এবং বটকে দিন
         await app.feed_update(await request.json())
     except Exception as e:
         logging.error(f"Webhook handler error: {e}")
     
-    # টেলিগ্রামকে জানাতে হবে যে আপডেট পেয়েছি
     return Response(status_code=200)
 
 async def health_check(request: Request):
     """সার্ভারটি যে চালু আছে তা পরীক্ষা করার জন্য (Health Check)"""
-    return PlainTextResponse("Bot is running (ASGI Mode)!")
+    return PlainTextResponse("Bot is running (ASGI Mode with manual webhook)!")
 
 # রুট বা URL গুলো ডিফাইন করুন
 routes = [
@@ -62,8 +73,6 @@ routes = [
 # Starlette ASGI অ্যাপ্লিকেশন তৈরি করুন
 server = Starlette(
     routes=routes,
-    on_startup=[startup],  # সার্ভার চালু হলে 'startup' ফাংশন চলবে
-    on_shutdown=[shutdown] # সার্ভার বন্ধ হলে 'shutdown' ফাংশন চলবে
+    on_startup=[startup],
+    on_shutdown=[shutdown]
 )
-
-# Gunicorn এই 'server' অবজেক্টটি ব্যবহার করবে
