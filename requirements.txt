@@ -3,3 +3,4 @@ TGCrypto
 aiohttp
 uvicorn
 fastapi
+asyncio
