@@ -1,9 +1,10 @@
 import logging
 import os
 import asyncio
+import aiohttp
 from fastapi import FastAPI, Request, Response
 from pyrogram import types
-from bot import app  # Import the configured app from bot.py
+from bot import app, BOT_TOKEN  # Import app and BOT_TOKEN from bot.py
 
 # Setup logging
 logging.basicConfig(
@@ -12,18 +13,19 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Get environment variables from Render
+# --- Environment Variables ---
 # RENDER_EXTERNAL_URL is automatically set by Render
 WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+# BOT_TOKEN is imported from bot.py, which gets it from os.environ
 
 # Basic validation
 if not WEBHOOK_URL:
-    log.error("RENDER_EXTERNAL_URL environment variable not set. Please ensure this is running on Render.")
-    # We don't exit here, as Render might set it during startup
+    log.error("RENDER_EXTERNAL_URL environment variable not set. Assuming local test.")
+    # For local testing, you might use a tool like ngrok and set this manually
+    # WEBHOOK_URL = "https://your-ngrok-url.ngrok.io" 
+
 if not BOT_TOKEN:
-    log.error("BOT_TOKEN environment variable not set.")
-    # We don't exit here, to allow for Render's startup process
+    log.critical("BOT_TOKEN environment variable not set. Bot cannot start.")
 
 # Define a secure webhook path
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
@@ -38,20 +40,31 @@ async def on_startup():
     """
     On server startup:
     1. Start the Pyrogram client.
-    2. Set the Telegram webhook to our server's URL.
+    2. Manually set the Telegram webhook using an HTTP request.
     """
-    log.info("Server is starting up...")
-    if not WEBHOOK_URL or not BOT_TOKEN:
-        log.error("Missing RENDER_EXTERNAL_URL or BOT_TOKEN. Webhook will not be set.")
+    if not BOT_TOKEN or not WEBHOOK_URL:
+        log.error("Missing BOT_TOKEN or RENDER_EXTERNAL_URL. Cannot set webhook.")
         return
         
+    log.info("Starting Pyrogram client...")
     await app.start()
     log.info("Pyrogram client started.")
+    
+    # --- THIS IS THE FIX ---
+    # Manually set the webhook using aiohttp
+    log.info(f"Setting webhook to {FULL_WEBHOOK_URL}...")
     try:
-        await app.set_webhook(FULL_WEBHOOK_URL)
-        log.info(f"Webhook set successfully to {FULL_WEBHOOK_URL}")
+        async with aiohttp.ClientSession() as session:
+            api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={FULL_WEBHOOK_URL}"
+            async with session.get(api_url) as resp:
+                response_json = await resp.json()
+                if resp.status == 200 and response_json.get("ok"):
+                    log.info("Webhook set successfully.")
+                else:
+                    log.error(f"Failed to set webhook: {response_json.get('description', 'Unknown error')}")
     except Exception as e:
-        log.error(f"Failed to set webhook: {e}")
+        log.error(f"Error setting webhook: {e}")
+    # --- END OF FIX ---
 
 @server.on_event("shutdown")
 async def on_shutdown():
@@ -60,7 +73,8 @@ async def on_shutdown():
     1. Stop the Pyrogram client.
     """
     log.info("Server is shutting down...")
-    await app.stop()
+    if app.is_connected:
+        await app.stop()
     log.info("Pyrogram client stopped.")
 
 @server.get("/")
@@ -74,18 +88,18 @@ async def health_check():
 async def webhook_listener(request: Request):
     """
     This endpoint receives the webhook updates from Telegram.
+    This logic is for Pyrogram v2+ and is correct.
     """
     try:
         # Get the update data from the request body
         json_data = await request.json()
         
-        # Manually construct the Update object
-        # 'app.read_update' is the correct way to do this
+        # 1. Convert the raw JSON dict into a Pyrogram Update object
         update = await app.read_update(json_data)
         
-        # Process the update in a background task
-        # This is crucial: it sends an immediate 200 OK response to Telegram
-        # and prevents timeout issues, as Render's free plan can be slow.
+        # 2. Process the Update object
+        # We run this in a background task to immediately send a 200 OK
+        # This prevents Telegram from resending the update.
         asyncio.create_task(app.process_update(update))
         
         # Return a 200 OK response to Telegram
@@ -93,6 +107,6 @@ async def webhook_listener(request: Request):
         
     except Exception as e:
         log.error(f"Error processing update: {e}")
-        # Return an error status, but still 200 to avoid Telegram resending
-        return Response(status_code=200)
+        return Response(status_code=500)
+
 
