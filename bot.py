@@ -1,80 +1,167 @@
+"""
+Telegram Content Saver Bot
+===========================
+A professional webhook-based bot that saves content from Telegram messages.
+
+Features:
+- Supports public and private channels
+- Handles topic/forum messages
+- Multiple media types support
+- Robust error handling
+- Webhook deployment ready
+
+Author: Your Name
+Version: 2.1.0 (Fixed spam loop)
+License: MIT
+"""
+
 import logging
 import os
-import asyncio
 import re
+from typing import Optional, Tuple, Dict, Any
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# --- Configuration ---
-# Read configuration from environment variables
-API_ID = os.environ.get("API_ID")
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OWNER_ID = os.environ.get("OWNER_ID") # This is now optional
+# ==================== CONFIGURATION ====================
 
-# --- Validation ---
-# Check if all required environment variables are set (OWNER_ID is no longer required)
-if not all([API_ID, API_HASH, BOT_TOKEN]):
-    logging.critical("ERROR: Missing one or more environment variables (API_ID, API_HASH, BOT_TOKEN)")
-    # We don't exit(1) here to allow server to start, but bot will fail
-    # In a real app, you'd want to handle this more gracefully.
-else:
-    # Convert string-based env vars to integers where needed
-    try:
-        API_ID = int(API_ID)
-        # --- MODIFIED: Make OWNER_ID optional ---
-        # Try to convert OWNER_ID, but set to None if it's missing or invalid
+class Config:
+    """
+    Bot configuration loaded from environment variables.
+    
+    Required:
+        API_ID: Telegram API ID from my.telegram.org
+        API_HASH: Telegram API Hash from my.telegram.org
+        BOT_TOKEN: Bot token from @BotFather
+    
+    Optional:
+        OWNER_ID: Telegram user ID for admin commands (can be None)
+    """
+    
+    # Load environment variables
+    API_ID: Optional[int] = None
+    API_HASH: Optional[str] = None
+    BOT_TOKEN: Optional[str] = None
+    OWNER_ID: Optional[int] = None
+    
+    @classmethod
+    def load(cls) -> bool:
+        """
+        Load and validate configuration from environment variables.
+        
+        Returns:
+            bool: True if configuration is valid, False otherwise
+        """
         try:
-            OWNER_ID = int(OWNER_ID)
-        except (ValueError, TypeError):
-            logging.warning("OWNER_ID not set or invalid. Admin commands will be disabled.")
-            OWNER_ID = None # Set to None if not provided or invalid
-    except ValueError:
-        logging.critical("ERROR: API_ID must be an integer.")
-        API_ID = None # Set to None to prevent client from starting
+            # Required variables
+            cls.API_ID = int(os.environ.get("API_ID", 0))
+            cls.API_HASH = os.environ.get("API_HASH")
+            cls.BOT_TOKEN = os.environ.get("BOT_TOKEN")
+            
+            # Optional variables
+            owner_id_str = os.environ.get("OWNER_ID")
+            if owner_id_str:
+                try:
+                    cls.OWNER_ID = int(owner_id_str)
+                except (ValueError, TypeError):
+                    logging.warning("OWNER_ID not set or invalid. Admin commands will be disabled.")
+                    cls.OWNER_ID = None
+            
+            # Validate required variables
+            if not all([cls.API_ID, cls.API_HASH, cls.BOT_TOKEN]):
+                logging.critical("Missing required environment variables (API_ID, API_HASH, BOT_TOKEN)")
+                return False
+            
+            return True
+            
+        except ValueError as e:
+            logging.critical(f"Configuration error: {e}")
+            return False
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 
-# Create bot client
-# We only initialize the client if the config is valid
-if API_ID:
-    app = Client(
-        "content_saver_bot",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        bot_token=BOT_TOKEN,
-        in_memory=True  # Use in-memory storage for session, better for ephemeral filesystems
+# ==================== LOGGING SETUP ====================
+
+def setup_logging():
+    """Configure logging with appropriate format and level."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler()
+        ]
     )
-else:
-    logging.error("Bot client not initialized due to missing/invalid config.")
-    # Create a placeholder if you need to avoid import errors in main.py
-    # This part is tricky; ideally main.py would check if app exists.
-    # For this setup, we assume main.py will fail gracefully if app.start() fails.
-    app = None 
 
-# --- Helper Functions ---
-# (Your helper functions remain unchanged)
+setup_logging()
+logger = logging.getLogger(__name__)
+
+
+# ==================== BOT INITIALIZATION ====================
+
+# Load configuration
+config_valid = Config.load()
+
+# Initialize Pyrogram client only if configuration is valid
+if config_valid:
+    app = Client(
+        name="content_saver_bot",
+        api_id=Config.API_ID,
+        api_hash=Config.API_HASH,
+        bot_token=Config.BOT_TOKEN,
+        in_memory=True,  # Use in-memory session storage (ideal for serverless/webhook deployments)
+    )
+    logger.info("Bot client initialized successfully")
+else:
+    logger.error("Bot client not initialized due to invalid configuration")
+    app = None
+
+
+# ==================== HELPER FUNCTIONS ====================
 
 def is_owner(user_id: int) -> bool:
-    """Check if user is the owner"""
-    # --- MODIFIED: Safely check if OWNER_ID is set and matches ---
-    return OWNER_ID is not None and user_id == OWNER_ID
+    """
+    Check if a user is the bot owner.
+    
+    Args:
+        user_id: Telegram user ID to check
+        
+    Returns:
+        bool: True if user is owner, False otherwise
+    """
+    return Config.OWNER_ID is not None and user_id == Config.OWNER_ID
 
-def parse_telegram_link(link):
-    """Enhanced URL parsing with better error handling for topic messages"""
+
+def parse_telegram_link(link: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse Telegram message links and extract relevant information.
+    
+    Supports the following link formats:
+    - Public channel: https://t.me/channel/123
+    - Private channel: https://t.me/c/1234567890/123
+    - Public topic: https://t.me/channel/topic_id/message_id
+    - Private topic: https://t.me/c/chat_id/topic_id/message_id
+    
+    Args:
+        link: Telegram message link
+        
+    Returns:
+        Dict with parsed information or None if link is invalid
+    """
     link = link.strip()
-
+    
+    # Define regex patterns for different link types
     patterns = [
+        # Private topic: https://t.me/c/1234567890/123/456
         (r"https?://t\.me/c/(\d+)/(\d+)/(\d+)$", "private_topic"),
+        
+        # Private channel: https://t.me/c/1234567890/123
         (r"https?://t\.me/c/(\d+)/(\d+)$", "private"),
+        
+        # Public topic: https://t.me/channel/123/456
         (r"https?://t\.me/([^/]+)/(\d+)/(\d+)$", "public_topic"),
+        
+        # Public channel: https://t.me/channel/123
         (r"https?://t\.me/([^/]+)/(\d+)$", "public")
     ]
-
+    
     for pattern, link_type in patterns:
         match = re.match(pattern, link)
         if match:
@@ -88,7 +175,7 @@ def parse_telegram_link(link):
             elif link_type == "private_topic":
                 return {
                     "type": "private_topic",
-                    "chat_id": int(f"-100{match.group(1)}"),
+                    "chat_id": int(f"-100{match.group(1)}"),  # Convert to full chat ID
                     "topic_id": int(match.group(2)),
                     "message_id": int(match.group(3))
                 }
@@ -106,364 +193,456 @@ def parse_telegram_link(link):
                     "message_id": int(match.group(2)),
                     "topic_id": None
                 }
-
+    
     return None
 
-async def send_message_copy(client, original_msg, to_chat_id):
-    """Send message by copying content manually"""
+
+async def send_message_by_type(client: Client, original_msg: Message, to_chat_id: int) -> Tuple[bool, Optional[str]]:
+    """
+    Send a message by determining its type and using the appropriate method.
+    
+    This function handles all common Telegram message types.
+    
+    Args:
+        client: Pyrogram client instance
+        original_msg: Original message to copy
+        to_chat_id: Destination chat ID
+        
+    Returns:
+        Tuple of (success: bool, error: Optional[str])
+    """
     try:
+        # Text message
         if original_msg.text:
             await client.send_message(
                 chat_id=to_chat_id,
                 text=original_msg.text
             )
+        
+        # Photo
         elif original_msg.photo:
             await client.send_photo(
                 chat_id=to_chat_id,
                 photo=original_msg.photo.file_id,
-                caption=original_msg.caption if original_msg.caption else ""
+                caption=original_msg.caption or ""
             )
+        
+        # Video
         elif original_msg.video:
             await client.send_video(
                 chat_id=to_chat_id,
                 video=original_msg.video.file_id,
-                caption=original_msg.caption if original_msg.caption else ""
+                caption=original_msg.caption or ""
             )
+        
+        # Document
         elif original_msg.document:
             await client.send_document(
                 chat_id=to_chat_id,
                 document=original_msg.document.file_id,
-                caption=original_msg.caption if original_msg.caption else ""
+                caption=original_msg.caption or ""
             )
+        
+        # Audio
         elif original_msg.audio:
             await client.send_audio(
                 chat_id=to_chat_id,
                 audio=original_msg.audio.file_id,
-                caption=original_msg.caption if original_msg.caption else ""
+                caption=original_msg.caption or ""
             )
+        
+        # Voice message
         elif original_msg.voice:
             await client.send_voice(
                 chat_id=to_chat_id,
                 voice=original_msg.voice.file_id,
-                caption=original_msg.caption if original_msg.caption else ""
+                caption=original_msg.caption or ""
             )
+        
+        # Sticker
         elif original_msg.sticker:
             await client.send_sticker(
                 chat_id=to_chat_id,
                 sticker=original_msg.sticker.file_id
             )
+        
+        # Animation/GIF
         elif original_msg.animation:
             await client.send_animation(
                 chat_id=to_chat_id,
                 animation=original_msg.animation.file_id,
-                caption=original_msg.caption if original_msg.caption else ""
+                caption=original_msg.caption or ""
             )
+        
+        # Unsupported type
         else:
-            return None, "Unsupported message type"
-
+            return False, "Unsupported message type"
+        
         return True, None
-
+    
     except Exception as e:
-        return None, str(e)
+        logger.error(f"Error sending message by type: {e}")
+        return False, str(e)
 
-async def copy_message_with_media(client, from_chat_id, message_id, to_chat_id, message_thread_id=None):
-    """Copy message with proper media handling"""
+
+async def copy_message_with_fallback(
+    client: Client,
+    from_chat_id: int,
+    message_id: int,
+    to_chat_id: int,
+    message_thread_id: Optional[int] = None
+) -> Tuple[Optional[Message], Optional[str]]:
+    """
+    Copy a message with multiple fallback methods.
+    
+    This function attempts to copy a message using three methods in order:
+    1. Manual copy by message type (most reliable)
+    2. Pyrogram's copy_message method
+    3. Forward message as last resort
+    
+    Args:
+        client: Pyrogram client instance
+        from_chat_id: Source chat/channel ID
+        message_id: Message ID to copy
+        to_chat_id: Destination chat ID
+        message_thread_id: Topic ID for forum messages (optional)
+        
+    Returns:
+        Tuple of (copied_message: Optional[Message], error: Optional[str])
+    """
     try:
-        # Get the original message first
+        # Fetch the original message
         original_msg = await client.get_messages(from_chat_id, message_id)
-
+        
         if not original_msg:
             return None, "Message not found"
-
-        # Check if message is empty
+        
+        # Check if message has any content
         if not original_msg.text and not original_msg.caption and not original_msg.media:
             return None, "Message is empty"
-
-        # Try manual copy first
-        success, error = await send_message_copy(client, original_msg, to_chat_id)
+        
+        # Method 1: Try manual copy by type (most reliable)
+        success, error = await send_message_by_type(client, original_msg, to_chat_id)
         if success:
-            return success, None
-
-        # If manual copy fails, try regular copy_message (without thread_id for topic messages)
+            logger.info(f"Successfully copied message {message_id} using manual method")
+            return original_msg, None
+        
+        # Method 2: Try Pyrogram's copy_message
         try:
             copied_msg = await client.copy_message(
                 chat_id=to_chat_id,
                 from_chat_id=from_chat_id,
                 message_id=message_id
             )
+            logger.info(f"Successfully copied message {message_id} using copy_message")
             return copied_msg, None
         except Exception as copy_error:
-            # If copy_message fails, try to forward the message
-            try:
-                forwarded_msg = await client.forward_messages(
-                    chat_id=to_chat_id,
-                    from_chat_id=from_chat_id,
-                    message_ids=message_id
-                )
-                return forwarded_msg, None
-            except Exception as forward_error:
-                return None, str(copy_error)
-
+            logger.warning(f"copy_message failed: {copy_error}")
+        
+        # Method 3: Try forwarding as last resort
+        try:
+            forwarded_msg = await client.forward_messages(
+                chat_id=to_chat_id,
+                from_chat_id=from_chat_id,
+                message_ids=message_id
+            )
+            logger.info(f"Successfully forwarded message {message_id}")
+            return forwarded_msg, None
+        except Exception as forward_error:
+            logger.error(f"All methods failed. Last error: {forward_error}")
+            return None, str(forward_error)
+    
     except Exception as e:
+        logger.error(f"Unexpected error in copy_message_with_fallback: {e}")
         return None, str(e)
 
-async def handle_copy_error(status_msg, error):
-    """Handle copy message errors"""
-    error_msg = str(error)
-    if "CHAT_ADMIN_REQUIRED" in error_msg:
-        await status_msg.edit("❌ Bot needs admin rights in the source channel.")
-    elif "USER_NOT_PARTICIPANT" in error_msg:
-        await status_msg.edit("❌ Bot is not a member of the source channel.")
-    elif "MESSAGE_ID_INVALID" in error_msg:
-        await status_msg.edit("❌ Message not found or invalid message ID.")
-    elif "CHANNEL_PRIVATE" in error_msg:
-        await status_msg.edit("❌ Cannot access private channel. Bot needs to be added to the channel.")
-    elif "PEER_ID_INVALID" in error_msg:
-        await status_msg.edit("❌ Invalid channel/chat ID. Make sure the link is correct.")
-    elif "FLOOD_WAIT" in error_msg:
-        await status_msg.edit("❌ Rate limited. Please try again later.")
-    elif "Message is empty" in error_msg:
-        await status_msg.edit("❌ The message appears to be empty or has no content to copy.")
-    elif "copy_message" in error_msg.lower():
-        await status_msg.edit("❌ Cannot copy this message. It might be a service message or restricted content.")
-    else:
-        await status_msg.edit(f"❌ Error: {error_msg}")
 
-# --- Bot Handlers ---
-# (Your handlers remain unchanged)
-# NOTE: We must check if 'app' was successfully initialized before adding handlers
+async def handle_copy_error(status_msg: Message, error: Exception) -> None:
+    """
+    Handle and display user-friendly error messages.
+    
+    Args:
+        status_msg: Status message to edit with error
+        error: Exception that occurred
+    """
+    error_msg = str(error)
+    
+    # --- FIX: Ignore MESSAGE_NOT_MODIFIED errors ---
+    if "MESSAGE_NOT_MODIFIED" in error_msg:
+        logger.warning("Ignoring 'MESSAGE_NOT_MODIFIED' error (likely a duplicate webhook).")
+        return
+        
+    # Map of error types to user-friendly messages
+    error_responses = {
+        "CHAT_ADMIN_REQUIRED": "❌ Bot needs admin rights in the source channel.",
+        "USER_NOT_PARTICIPANT": "❌ Bot is not a member of the source channel.",
+        "MESSAGE_ID_INVALID": "❌ Message not found or invalid message ID.",
+        "CHANNEL_PRIVATE": "❌ Cannot access private channel. Bot needs to be added to the channel.",
+        "PEER_ID_INVALID": "❌ Invalid channel/chat ID. Make sure the link is correct.",
+        "FLOOD_WAIT": "❌ Rate limited by Telegram. Please try again later.",
+        "Message is empty": "❌ The message appears to be empty or has no content to copy.",
+    }
+    
+    # Check for known error types
+    for error_type, response in error_responses.items():
+        if error_type in error_msg:
+            await status_msg.edit(response)
+            return
+    
+    # Generic error for unknown types
+    await status_msg.edit(f"❌ Error: {error_msg}")
+
+
+# ==================== BOT COMMAND HANDLERS ====================
+# --- FIX: Added filters.private & ~filters.me to prevent spam loops ---
 
 if app:
-    @app.on_message(filters.command("start"))
-    async def start_command(client, message: Message):
-        """Handle /start command"""
+    
+    @app.on_message(filters.command("start") & filters.private & ~filters.me)
+    async def start_command(client: Client, message: Message):
+        """
+        Handle /start command - Display welcome message and usage instructions.
         
-        # --- MODIFIED: Removed owner check ---
-        # if not is_owner(message.from_user.id):
-        #     await message.reply("❌ Access Denied! This bot is private.")
-        #     return
-        # --- END MODIFICATION ---
-
-        await message.reply(
+        This command is accessible to all users.
+        """
+        welcome_text = (
             "🤖 **Content Saver Bot**\n\n"
             "📋 **How to use:**\n"
             "• Send any Telegram message link\n"
-            "• Bot will try to fetch and forward the content\n"
-            "• Now supports topic messages!\n\n"
+            "• Bot will fetch and forward the content to you\n"
+            "• Supports regular channels and topic/forum messages\n\n"
+            "📌 **Supported formats:**\n"
+            "• Text, photos, videos, documents\n"
+            "• Audio, voice messages, stickers\n"
+            "• Animations and GIFs\n\n"
             "✅ **Ready to save content!**"
         )
-
-    @app.on_message(filters.text & ~filters.command("start"))
-    async def handle_message(client, message: Message):
-        """Handle incoming messages with topic support"""
-
-        # --- MODIFIED: Removed owner check ---
-        # if not is_owner(message.from_user.id):
-        #     await message.reply("❌ Access Denied!")
-        #     return
-        # --- END MODIFICATION ---
-
+        await message.reply(welcome_text)
+        logger.info(f"User {message.from_user.id} started the bot")
+    
+    
+    @app.on_message(filters.text & ~filters.command("start") & filters.private & ~filters.me)
+    async def handle_message_link(client: Client, message: Message):
+        """
+        Handle incoming Telegram message links.
+        
+        This is the main functionality of the bot. It:
+        1. Validates the message contains a Telegram link
+        2. Parses the link to extract chat and message information
+        3. Attempts to copy the message to the user
+        4. Provides appropriate feedback
+        """
         text = message.text
-
+        
         # Check if message contains a Telegram link
         if not any(domain in text for domain in ['t.me/', 'telegram.me/']):
             await message.reply("📎 Please send a valid Telegram message link.")
             return
-
-        # Extract link from text
+        
+        # Extract link using regex
         link_pattern = r'https?://(?:t\.me|telegram\.me)/\S+'
         link_match = re.search(link_pattern, text)
-
+        
         if not link_match:
-            await message.reply("❌ No valid Telegram link found.")
+            await message.reply("❌ No valid Telegram link found in your message.")
             return
-
+        
         telegram_link = link_match.group()
-
-        # Send processing message
-        status_msg = await message.reply("🔄 Processing...")
-
+        logger.info(f"Processing link from user {message.from_user.id}: {telegram_link}")
+        
+        # Send processing status
+        status_msg = await message.reply("🔄 Processing your request...")
+        
         try:
-            # Parse the link using the enhanced function
+            # Parse the Telegram link
             parsed_link = parse_telegram_link(telegram_link)
-
+            
             if not parsed_link:
-                await status_msg.edit("❌ Invalid Telegram link format.")
+                await status_msg.edit("❌ Invalid Telegram link format. Please check the link and try again.")
                 return
-
-            # Handle different link types
-            if parsed_link["type"] == "public_topic":
-                # Public channel with topic
-                channel = parsed_link["channel"]
-                topic_id = parsed_link["topic_id"]
-                msg_id = parsed_link["message_id"]
-
-                copied_msg, error = await copy_message_with_media(
-                    client, 
-                    from_chat_id=channel,
-                    message_id=msg_id,
-                    to_chat_id=message.chat.id,
-                    message_thread_id=topic_id
-                )
-
-                if error:
-                    await handle_copy_error(status_msg, Exception(error))
-                else:
-                    await status_msg.edit(f"✅ Content saved from topic {topic_id}!")
-
-            elif parsed_link["type"] == "private_topic":
-                # Private channel with topic
+            
+            link_type = parsed_link["type"]
+            msg_id = parsed_link["message_id"]
+            
+            # Determine chat ID based on link type
+            if link_type in ["public_topic", "public"]:
+                chat_id = parsed_link["channel"]
+            else:
                 chat_id = parsed_link["chat_id"]
-                topic_id = parsed_link["topic_id"]
-                msg_id = parsed_link["message_id"]
-
-                copied_msg, error = await copy_message_with_media(
-                    client,
-                    from_chat_id=chat_id,
-                    message_id=msg_id,
-                    to_chat_id=message.chat.id,
-                    message_thread_id=topic_id
-                )
-
-                if error:
-                    await handle_copy_error(status_msg, Exception(error))
-                else:
-                    await status_msg.edit(f"✅ Content saved from private topic {topic_id}!")
-
-            elif parsed_link["type"] == "public":
-                # Regular public channel
-                channel = parsed_link["channel"]
-                msg_id = parsed_link["message_id"]
-
-                copied_msg, error = await copy_message_with_media(
-                    client,
-                    from_chat_id=channel,
-                    message_id=msg_id,
-                    to_chat_id=message.chat.id
-                )
-
-                if error:
-                    await handle_copy_error(status_msg, Exception(error))
-                else:
-                    await status_msg.edit("✅ Content saved successfully!")
-
-            elif parsed_link["type"] == "private":
-                # Regular private channel
-                chat_id = parsed_link["chat_id"]
-                msg_id = parsed_link["message_id"]
-
-                copied_msg, error = await copy_message_with_media(
-                    client,
-                    from_chat_id=chat_id,
-                    message_id=msg_id,
-                    to_chat_id=message.chat.id
-                )
-
-                if error:
-                    await handle_copy_error(status_msg, Exception(error))
-                else:
-                    await status_msg.edit("✅ Content saved successfully!")
-
+            
+            # Extract topic ID if present
+            topic_id = parsed_link.get("topic_id")
+            
+            # Attempt to copy the message
+            copied_msg, error = await copy_message_with_fallback(
+                client=client,
+                from_chat_id=chat_id,
+                message_id=msg_id,
+                to_chat_id=message.chat.id,
+                message_thread_id=topic_id
+            )
+            
+            # Handle result
+            if error:
+                await handle_copy_error(status_msg, Exception(error))
+                logger.warning(f"Failed to copy message: {error}")
+            else:
+                success_msg = "✅ Content saved successfully!"
+                if topic_id:
+                    success_msg += f" (from topic {topic_id})"
+                await status_msg.edit(success_msg)
+                logger.info(f"Successfully copied message {msg_id} for user {message.from_user.id}")
+        
         except Exception as e:
-            await status_msg.edit(f"❌ Unexpected error: {str(e)}")
-
-
-    @app.on_message(filters.command("status"))
-    async def status_command(client, message: Message):
-        """Check bot status"""
-        # --- This command is still protected ---
+            await handle_copy_error(status_msg, e) # Use our handler to check for non-critical errors
+            logger.error(f"Unexpected error processing link: {e}", exc_info=True)
+    
+    
+    @app.on_message(filters.command("status") & filters.private & ~filters.me)
+    async def status_command(client: Client, message: Message):
+        """
+        Check bot status and display information.
+        
+        This command is restricted to the bot owner.
+        """
+        # Check if user is owner
+        if not is_owner(message.from_user.id):
+            await message.reply("❌ This command is for the bot owner only.")
+            logger.warning(f"Unauthorized status command from user {message.from_user.id}")
+            return
+        
+        # Get bot information
+        me = await client.get_me()
+        
+        status_text = (
+            "🟢 **Bot Status: Online (Webhook Mode)**\n\n"
+            f"🆔 **Bot ID:** `{me.id}`\n"
+            f"👤 **Username:** @{me.username}\n"
+            f"📝 **First Name:** {me.first_name}\n"
+            f"🔧 **Pyrogram Version:** {client.pyro_version}\n"
+            f"👑 **Owner ID:** `{Config.OWNER_ID}`"
+        )
+        
+        await message.reply(status_text)
+        logger.info(f"Status command executed by owner {message.from_user.id}")
+    
+    
+    @app.on_message(filters.command("test") & filters.private & ~filters.me)
+    async def test_link_parsing(client: Client, message: Message):
+        """
+        Test the link parsing functionality with sample links.
+        
+        This command is restricted to the bot owner.
+        """
         if not is_owner(message.from_user.id):
             await message.reply("❌ This command is for the bot owner only.")
             return
         
-        me = await client.get_me()
-        await message.reply(
-            "🟢 **Bot Status: Online (Webhook)**\n\n"
-            f"🆔 **Bot ID:** {me.id}\n"
-            f"👤 **Bot Username:** @{me.username}\n"
-            f"📱 **Pyrogram Version:** {client.pyro_version}"
-        )
-
-    @app.on_message(filters.command("test"))
-    async def test_command(client, message: Message):
-        """Test link parsing"""
-        # --- This command is still protected ---
-        if not is_owner(message.from_user.id):
-            await message.reply("❌ This command is for the bot owner only.")
-            return
-
+        # Sample test links
         test_links = [
             "https://t.me/freecoursebioc1/2/203",   # Public topic
             "https://t.me/c/1234567890/123/456",    # Private topic
-            "https://t.me/channel/123",             # Public channel
+            "https://t.me/mychannel/123",           # Public channel
             "https://t.me/c/1234567890/123"         # Private channel
         ]
-
-        result = "🧪 **Link Parsing Test:**\n\n"
+        
+        result = "🧪 **Link Parsing Test Results:**\n\n"
+        
         for link in test_links:
             parsed = parse_telegram_link(link)
             if parsed:
-                result += f"✅ `{link}`\n"
-                result += f"   Type: {parsed['type']}\n"
+                result += f"✅ Link parsed successfully\n"
+                result += f"   `{link}`\n"
+                result += f"   **Type:** {parsed['type']}\n"
                 if 'topic_id' in parsed and parsed['topic_id']:
-                    result += f"   Topic ID: {parsed['topic_id']}\n"
-                result += "\n"
+                    result += f"   **Topic ID:** {parsed['topic_id']}\n"
+                result += f"   **Message ID:** {parsed['message_id']}\n\n"
             else:
-                result += f"❌ `{link}` - Failed to parse\n\n"
-
+                result += f"❌ Failed to parse\n   `{link}`\n\n"
+        
         await message.reply(result)
-
-    @app.on_message(filters.command("debug"))
-    async def debug_command(client, message: Message):
-        """Debug message details"""
-        # --- This command is still protected ---
+        logger.info(f"Test command executed by owner {message.from_user.id}")
+    
+    
+    @app.on_message(filters.command("debug") & filters.private & ~filters.me)
+    async def debug_message(client: Client, message: Message):
+        """
+        Debug a Telegram message link and show detailed information.
+        
+        Usage: /debug <telegram_link>
+        
+        This command is restricted to the bot owner.
+        """
         if not is_owner(message.from_user.id):
             await message.reply("❌ This command is for the bot owner only.")
             return
-
-        # Get the message text after the command
+        
+        # Extract link from command
         text = message.text.replace("/debug", "").strip()
-
+        
         if not text:
-            await message.reply("Usage: /debug <telegram_link>")
+            await message.reply(
+                "**Usage:** `/debug <telegram_link>`\n\n"
+                "**Example:** `/debug https://t.me/channel/123`"
+            )
             return
-
+        
+        # Parse the link
         parsed = parse_telegram_link(text)
+        
         if not parsed:
             await message.reply("❌ Invalid link format")
             return
-
+        
         try:
-            # Get message details
+            # Determine chat ID
             if parsed["type"] in ["public_topic", "public"]:
                 chat_id = parsed["channel"]
             else:
                 chat_id = parsed["chat_id"]
-
+            
             msg_id = parsed["message_id"]
+            
+            # Fetch message details
             original_msg = await client.get_messages(chat_id, msg_id)
-
+            
             if not original_msg:
-                await message.reply("❌ Message not found")
+                await message.reply("❌ Message not found or bot doesn't have access")
                 return
-
-            debug_info = f"🔍 **Message Debug Info:**\n\n"
-            debug_info += f"**Type:** {parsed['type']}\n"
-            debug_info += f"**Chat ID:** {chat_id}\n"
-            debug_info += f"**Message ID:** {msg_id}\n"
+            
+            # Build debug information
+            debug_info = (
+                "🔍 **Message Debug Information**\n\n"
+                f"**Link Type:** {parsed['type']}\n"
+                f"**Chat ID:** `{chat_id}`\n"
+                f"**Message ID:** `{msg_id}`\n"
+            )
+            
             if 'topic_id' in parsed and parsed['topic_id']:
-                debug_info += f"**Topic ID:** {parsed['topic_id']}\n"
-            debug_info += f"**Has Text:** {'Yes' if original_msg.text else 'No'}\n"
-            debug_info += f"**Has Caption:** {'Yes' if original_msg.caption else 'No'}\n"
-            debug_info += f"**Has Media:** {'Yes' if original_msg.media else 'No'}\n"
-            debug_info += f"**Media Type:** {original_msg.media if original_msg.media else 'None'}\n"
-
+                debug_info += f"**Topic ID:** `{parsed['topic_id']}`\n"
+            
+            debug_info += f"\n**Content Analysis:**\n"
+            debug_info += f"• Has Text: {'✅' if original_msg.text else '❌'}\n"
+            debug_info += f"• Has Caption: {'✅' if original_msg.caption else '❌'}\n"
+            debug_info += f"• Has Media: {'✅' if original_msg.media else '❌'}\n"
+            
+            if original_msg.media:
+                debug_info += f"• Media Type: {original_msg.media.value}\n"
+            
             await message.reply(debug_info)
-
+            logger.info(f"Debug command executed for message {msg_id}")
+        
         except Exception as e:
             await message.reply(f"❌ Debug error: {str(e)}")
+            logger.error(f"Debug command error: {e}", exc_info=True)
 
-# --- REMOVED Polling ---
-# The 'if __name__ == "__main__":' block
-# and 'app.run()' have been removed.
-# The server in 'main.py' now controls the bot's lifecycle.
+
+# ==================== MODULE EXPORTS ====================
+
+# Export the app instance and BOT_TOKEN for use in main.py
+__all__ = ['app', 'BOT_TOKEN']
+BOT_TOKEN = Config.BOT_TOKEN
+
+logger.info("Bot module loaded successfully")
+
+
