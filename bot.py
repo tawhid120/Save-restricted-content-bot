@@ -1,32 +1,57 @@
 import logging
-from pyrogram import Client, filters
-from pyrogram.types import Message
+import os
 import asyncio
 import re
+from pyrogram import Client, filters
+from pyrogram.types import Message
 
-# Configuration (এগুলো আমরা Render-এ সেট করবো)
-# --- পরিবর্তন এখানে ---
-# Configuration (Render-এর Environment Variables থেকে ডেটা নিন)
-import os
-
-API_ID = int(os.environ.get("API_ID"))
+# --- Configuration ---
+# Read configuration from environment variables
+API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OWNER_ID = int(os.environ.get("OWNER_ID"))
-# --- পরিবর্তন শেষ ---
+OWNER_ID = os.environ.get("OWNER_ID")
+
+# --- Validation ---
+# Check if all required environment variables are set
+if not all([API_ID, API_HASH, BOT_TOKEN, OWNER_ID]):
+    logging.critical("ERROR: Missing one or more environment variables (API_ID, API_HASH, BOT_TOKEN, OWNER_ID)")
+    # We don't exit(1) here to allow server to start, but bot will fail
+    # In a real app, you'd want to handle this more gracefully.
+else:
+    # Convert string-based env vars to integers where needed
+    try:
+        API_ID = int(API_ID)
+        OWNER_ID = int(OWNER_ID)
+    except ValueError:
+        logging.critical("ERROR: API_ID and OWNER_ID must be integers.")
+        API_ID = None # Set to None to prevent client from starting
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
-
-# --- পরিবর্তন এখানে ---
-# Create bot client with in_memory=True
-app = Client(
-    "content_saver_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    in_memory=True  # এই লাইনটি যোগ করা হয়েছে
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+
+# Create bot client
+# We only initialize the client if the config is valid
+if API_ID:
+    app = Client(
+        "content_saver_bot",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN,
+        in_memory=True  # Use in-memory storage for session, better for ephemeral filesystems
+    )
+else:
+    logging.error("Bot client not initialized due to missing/invalid config.")
+    # Create a placeholder if you need to avoid import errors in main.py
+    # This part is tricky; ideally main.py would check if app exists.
+    # For this setup, we assume main.py will fail gracefully if app.start() fails.
+    app = None 
+
+# --- Helper Functions ---
+# (Your helper functions remain unchanged)
 
 def is_owner(user_id: int) -> bool:
     """Check if user is the owner"""
@@ -175,133 +200,6 @@ async def copy_message_with_media(client, from_chat_id, message_id, to_chat_id, 
     except Exception as e:
         return None, str(e)
 
-@app.on_message(filters.command("start"))
-async def start_command(client, message: Message):
-    """Handle /start command"""
-    if not is_owner(message.from_user.id):
-        await message.reply("❌ Access Denied! This bot is private.")
-        return
-
-    await message.reply(
-        "🤖 **Content Saver Bot (Webhook)**\n\n"
-        "📋 **How to use:**\n"
-        "• Send any Telegram message link\n"
-        "• Bot will try to fetch and forward the content\n"
-        "• Now supports topic messages!\n\n"
-        "✅ **Ready to save content!**"
-    )
-
-@app.on_message(filters.text & ~filters.command("start"))
-async def handle_message(client, message: Message):
-    """Handle incoming messages with topic support"""
-    if not is_owner(message.from_user.id):
-        await message.reply("❌ Access Denied!")
-        return
-
-    text = message.text
-
-    # Check if message contains a Telegram link
-    if not any(domain in text for domain in ['t.me/', 'telegram.me/']):
-        await message.reply("📎 Please send a valid Telegram message link.")
-        return
-
-    # Extract link from text
-    link_pattern = r'https?://(?:t\.me|telegram\.me)/\S+'
-    link_match = re.search(link_pattern, text)
-
-    if not link_match:
-        await message.reply("❌ No valid Telegram link found.")
-        return
-
-    telegram_link = link_match.group()
-
-    # Send processing message
-    status_msg = await message.reply("🔄 Processing...")
-
-    try:
-        # Parse the link using the enhanced function
-        parsed_link = parse_telegram_link(telegram_link)
-
-        if not parsed_link:
-            await status_msg.edit("❌ Invalid Telegram link format.")
-            return
-
-        # Handle different link types
-        if parsed_link["type"] == "public_topic":
-            # Public channel with topic
-            channel = parsed_link["channel"]
-            topic_id = parsed_link["topic_id"]
-            msg_id = parsed_link["message_id"]
-
-            copied_msg, error = await copy_message_with_media(
-                client, 
-                from_chat_id=channel,
-                message_id=msg_id,
-                to_chat_id=message.chat.id,
-                message_thread_id=topic_id
-            )
-
-            if error:
-                await handle_copy_error(status_msg, Exception(error))
-            else:
-                await status_msg.edit(f"✅ Content saved from topic {topic_id}!")
-
-        elif parsed_link["type"] == "private_topic":
-            # Private channel with topic
-            chat_id = parsed_link["chat_id"]
-            topic_id = parsed_link["topic_id"]
-            msg_id = parsed_link["message_id"]
-
-            copied_msg, error = await copy_message_with_media(
-                client,
-                from_chat_id=chat_id,
-                message_id=msg_id,
-                to_chat_id=message.chat.id,
-                message_thread_id=topic_id
-            )
-
-            if error:
-                await handle_copy_error(status_msg, Exception(error))
-            else:
-                await status_msg.edit(f"✅ Content saved from private topic {topic_id}!")
-
-        elif parsed_link["type"] == "public":
-            # Regular public channel
-            channel = parsed_link["channel"]
-            msg_id = parsed_link["message_id"]
-
-            copied_msg, error = await copy_message_with_media(
-                client,
-                from_chat_id=channel,
-                message_id=msg_id,
-                to_chat_id=message.chat.id
-            )
-
-            if error:
-                await handle_copy_error(status_msg, Exception(error))
-            else:
-                await status_msg.edit("✅ Content saved successfully!")
-
-        elif parsed_link["type"] == "private":
-            # Regular private channel
-            chat_id = parsed_link["chat_id"]
-            msg_id = parsed_link["message_id"]
-
-            copied_msg, error = await copy_message_with_media(
-                client,
-                from_chat_id=chat_id,
-                message_id=msg_id,
-                to_chat_id=message.chat.id
-            )
-
-            if error:
-                await handle_copy_error(status_msg, Exception(error))
-            else:
-                await status_msg.edit("✅ Content saved successfully!")
-
-    except Exception as e:
-        await status_msg.edit(f"❌ Unexpected error: {str(e)}")
-
 async def handle_copy_error(status_msg, error):
     """Handle copy message errors"""
     error_msg = str(error)
@@ -324,101 +222,233 @@ async def handle_copy_error(status_msg, error):
     else:
         await status_msg.edit(f"❌ Error: {error_msg}")
 
-@app.on_message(filters.command("status"))
-async def status_command(client, message: Message):
-    """Check bot status"""
-    if not is_owner(message.from_user.id):
-        await message.reply("❌ Access Denied!")
-        return
+# --- Bot Handlers ---
+# (Your handlers remain unchanged)
+# NOTE: We must check if 'app' was successfully initialized before adding handlers
 
-    # বট ক্লায়েন্ট থেকে me (নিজের) তথ্য নিন
-    me = await client.get_me()
-
-    await message.reply(
-        "🟢 **Bot Status: Online (Webhook)**\n\n"
-        f"🆔 **Bot ID:** {me.id}\n"
-        f"👤 **Bot Username:** @{me.username}\n"
-        f"📱 **Pyrogram Version:** {Client.pyro_version}"
-    )
-
-@app.on_message(filters.command("test"))
-async def test_command(client, message: Message):
-    """Test link parsing"""
-    if not is_owner(message.from_user.id):
-        await message.reply("❌ Access Denied!")
-        return
-
-    test_links = [
-        "https://t.me/freecoursebioc1/2/203",   # Public topic
-        "https://t.me/c/1234567890/123/456",    # Private topic
-        "https://t.me/channel/123",             # Public channel
-        "https://t.me/c/1234567890/123"         # Private channel
-    ]
-
-    result = "🧪 **Link Parsing Test:**\n\n"
-    for link in test_links:
-        parsed = parse_telegram_link(link)
-        if parsed:
-            result += f"✅ `{link}`\n"
-            result += f"   Type: {parsed['type']}\n"
-            if 'topic_id' in parsed and parsed['topic_id']:
-                result += f"   Topic ID: {parsed['topic_id']}\n"
-            result += "\n"
-        else:
-            result += f"❌ `{link}` - Failed to parse\n\n"
-
-    await message.reply(result)
-
-@app.on_message(filters.command("debug"))
-async def debug_command(client, message: Message):
-    """Debug message details"""
-    if not is_owner(message.from_user.id):
-        await message.reply("❌ Access Denied!")
-        return
-
-    # Get the message text after the command
-    text = message.text.replace("/debug", "").strip()
-
-    if not text:
-        await message.reply("Usage: /debug <telegram_link>")
-        return
-
-    parsed = parse_telegram_link(text)
-    if not parsed:
-        await message.reply("❌ Invalid link format")
-        return
-
-    try:
-        # Get message details
-        if parsed["type"] in ["public_topic", "public"]:
-            chat_id = parsed["channel"]
-        else:
-            chat_id = parsed["chat_id"]
-
-        msg_id = parsed["message_id"]
-        original_msg = await client.get_messages(chat_id, msg_id)
-
-        if not original_msg:
-            await message.reply("❌ Message not found")
+if app:
+    @app.on_message(filters.command("start"))
+    async def start_command(client, message: Message):
+        """Handle /start command"""
+        if not is_owner(message.from_user.id):
+            await message.reply("❌ Access Denied! This bot is private.")
             return
 
-        debug_info = f"🔍 **Message Debug Info:**\n\n"
-        debug_info += f"**Type:** {parsed['type']}\n"
-        debug_info += f"**Chat ID:** {chat_id}\n"
-        debug_info += f"**Message ID:** {msg_id}\n"
-        if 'topic_id' in parsed and parsed['topic_id']:
-            debug_info += f"**Topic ID:** {parsed['topic_id']}\n"
-        debug_info += f"**Has Text:** {'Yes' if original_msg.text else 'No'}\n"
-        debug_info += f"**Has Caption:** {'Yes' if original_msg.caption else 'No'}\n"
-        debug_info += f"**Has Media:** {'Yes' if original_msg.media else 'No'}\n"
-        debug_info += f"**Media Type:** {original_msg.media if original_msg.media else 'None'}\n"
+        await message.reply(
+            "🤖 **Content Saver Bot**\n\n"
+            "📋 **How to use:**\n"
+            "• Send any Telegram message link\n"
+            "• Bot will try to fetch and forward the content\n"
+            "• Now supports topic messages!\n\n"
+            "✅ **Ready to save content!**"
+        )
 
-        await message.reply(debug_info)
+    @app.on_message(filters.text & ~filters.command("start"))
+    async def handle_message(client, message: Message):
+        """Handle incoming messages with topic support"""
+        if not is_owner(message.from_user.id):
+            await message.reply("❌ Access Denied!")
+            return
 
-    except Exception as e:
-        await message.reply(f"❌ Debug error: {str(e)}")
+        text = message.text
 
-# --- পরিবর্তন এখানে ---
-# কোডের শেষ থেকে if __name__ == "__main__": এবং app.run() ব্লকটি
-# সম্পূর্ণ মুছে ফেলা হয়েছে।
+        # Check if message contains a Telegram link
+        if not any(domain in text for domain in ['t.me/', 'telegram.me/']):
+            await message.reply("📎 Please send a valid Telegram message link.")
+            return
+
+        # Extract link from text
+        link_pattern = r'https?://(?:t\.me|telegram\.me)/\S+'
+        link_match = re.search(link_pattern, text)
+
+        if not link_match:
+            await message.reply("❌ No valid Telegram link found.")
+            return
+
+        telegram_link = link_match.group()
+
+        # Send processing message
+        status_msg = await message.reply("🔄 Processing...")
+
+        try:
+            # Parse the link using the enhanced function
+            parsed_link = parse_telegram_link(telegram_link)
+
+            if not parsed_link:
+                await status_msg.edit("❌ Invalid Telegram link format.")
+                return
+
+            # Handle different link types
+            if parsed_link["type"] == "public_topic":
+                # Public channel with topic
+                channel = parsed_link["channel"]
+                topic_id = parsed_link["topic_id"]
+                msg_id = parsed_link["message_id"]
+
+                copied_msg, error = await copy_message_with_media(
+                    client, 
+                    from_chat_id=channel,
+                    message_id=msg_id,
+                    to_chat_id=message.chat.id,
+                    message_thread_id=topic_id
+                )
+
+                if error:
+                    await handle_copy_error(status_msg, Exception(error))
+                else:
+                    await status_msg.edit(f"✅ Content saved from topic {topic_id}!")
+
+            elif parsed_link["type"] == "private_topic":
+                # Private channel with topic
+                chat_id = parsed_link["chat_id"]
+                topic_id = parsed_link["topic_id"]
+                msg_id = parsed_link["message_id"]
+
+                copied_msg, error = await copy_message_with_media(
+                    client,
+                    from_chat_id=chat_id,
+                    message_id=msg_id,
+                    to_chat_id=message.chat.id,
+                    message_thread_id=topic_id
+                )
+
+                if error:
+                    await handle_copy_error(status_msg, Exception(error))
+                else:
+                    await status_msg.edit(f"✅ Content saved from private topic {topic_id}!")
+
+            elif parsed_link["type"] == "public":
+                # Regular public channel
+                channel = parsed_link["channel"]
+                msg_id = parsed_link["message_id"]
+
+                copied_msg, error = await copy_message_with_media(
+                    client,
+                    from_chat_id=channel,
+                    message_id=msg_id,
+                    to_chat_id=message.chat.id
+                )
+
+                if error:
+                    await handle_copy_error(status_msg, Exception(error))
+                else:
+                    await status_msg.edit("✅ Content saved successfully!")
+
+            elif parsed_link["type"] == "private":
+                # Regular private channel
+                chat_id = parsed_link["chat_id"]
+                msg_id = parsed_link["message_id"]
+
+                copied_msg, error = await copy_message_with_media(
+                    client,
+                    from_chat_id=chat_id,
+                    message_id=msg_id,
+                    to_chat_id=message.chat.id
+                )
+
+                if error:
+                    await handle_copy_error(status_msg, Exception(error))
+                else:
+                    await status_msg.edit("✅ Content saved successfully!")
+
+        except Exception as e:
+            await status_msg.edit(f"❌ Unexpected error: {str(e)}")
+
+
+    @app.on_message(filters.command("status"))
+    async def status_command(client, message: Message):
+        """Check bot status"""
+        if not is_owner(message.from_user.id):
+            await message.reply("❌ Access Denied!")
+            return
+        
+        me = await client.get_me()
+        await message.reply(
+            "🟢 **Bot Status: Online (Webhook)**\n\n"
+            f"🆔 **Bot ID:** {me.id}\n"
+            f"👤 **Bot Username:** @{me.username}\n"
+            f"📱 **Pyrogram Version:** {client.pyro_version}"
+        )
+
+    @app.on_message(filters.command("test"))
+    async def test_command(client, message: Message):
+        """Test link parsing"""
+        if not is_owner(message.from_user.id):
+            await message.reply("❌ Access Denied!")
+            return
+
+        test_links = [
+            "https://t.me/freecoursebioc1/2/203",   # Public topic
+            "https://t.me/c/1234567890/123/456",    # Private topic
+            "https://t.me/channel/123",             # Public channel
+            "https://t.me/c/1234567890/123"         # Private channel
+        ]
+
+        result = "🧪 **Link Parsing Test:**\n\n"
+        for link in test_links:
+            parsed = parse_telegram_link(link)
+            if parsed:
+                result += f"✅ `{link}`\n"
+                result += f"   Type: {parsed['type']}\n"
+                if 'topic_id' in parsed and parsed['topic_id']:
+                    result += f"   Topic ID: {parsed['topic_id']}\n"
+                result += "\n"
+            else:
+                result += f"❌ `{link}` - Failed to parse\n\n"
+
+        await message.reply(result)
+
+    @app.on_message(filters.command("debug"))
+    async def debug_command(client, message: Message):
+        """Debug message details"""
+        if not is_owner(message.from_user.id):
+            await message.reply("❌ Access Denied!")
+            return
+
+        # Get the message text after the command
+        text = message.text.replace("/debug", "").strip()
+
+        if not text:
+            await message.reply("Usage: /debug <telegram_link>")
+            return
+
+        parsed = parse_telegram_link(text)
+        if not parsed:
+            await message.reply("❌ Invalid link format")
+            return
+
+        try:
+            # Get message details
+            if parsed["type"] in ["public_topic", "public"]:
+                chat_id = parsed["channel"]
+            else:
+                chat_id = parsed["chat_id"]
+
+            msg_id = parsed["message_id"]
+            original_msg = await client.get_messages(chat_id, msg_id)
+
+            if not original_msg:
+                await message.reply("❌ Message not found")
+                return
+
+            debug_info = f"🔍 **Message Debug Info:**\n\n"
+            debug_info += f"**Type:** {parsed['type']}\n"
+            debug_info += f"**Chat ID:** {chat_id}\n"
+            debug_info += f"**Message ID:** {msg_id}\n"
+            if 'topic_id' in parsed and parsed['topic_id']:
+                debug_info += f"**Topic ID:** {parsed['topic_id']}\n"
+            debug_info += f"**Has Text:** {'Yes' if original_msg.text else 'No'}\n"
+            debug_info += f"**Has Caption:** {'Yes' if original_msg.caption else 'No'}\n"
+            debug_info += f"**Has Media:** {'Yes' if original_msg.media else 'No'}\n"
+            debug_info += f"**Media Type:** {original_msg.media if original_msg.media else 'None'}\n"
+
+            await message.reply(debug_info)
+
+        except Exception as e:
+            await message.reply(f"❌ Debug error: {str(e)}")
+
+# --- REMOVED Polling ---
+# The 'if __name__ == "__main__":' block
+# and 'app.run()' have been removed.
+# The server in 'main.py' now controls the bot's lifecycle.
 
