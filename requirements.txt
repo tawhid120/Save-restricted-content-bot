@@ -1,5 +1,5 @@
 pyrogram>=2.0.0
-TGCrypto>=2.0.0
+TGCrypto
 aiohttp
 uvicorn
 fastapi
