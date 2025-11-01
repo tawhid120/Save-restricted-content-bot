@@ -10,21 +10,27 @@ from pyrogram.types import Message
 API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OWNER_ID = os.environ.get("OWNER_ID")
+OWNER_ID = os.environ.get("OWNER_ID") # This is now optional
 
 # --- Validation ---
-# Check if all required environment variables are set
-if not all([API_ID, API_HASH, BOT_TOKEN, OWNER_ID]):
-    logging.critical("ERROR: Missing one or more environment variables (API_ID, API_HASH, BOT_TOKEN, OWNER_ID)")
+# Check if all required environment variables are set (OWNER_ID is no longer required)
+if not all([API_ID, API_HASH, BOT_TOKEN]):
+    logging.critical("ERROR: Missing one or more environment variables (API_ID, API_HASH, BOT_TOKEN)")
     # We don't exit(1) here to allow server to start, but bot will fail
     # In a real app, you'd want to handle this more gracefully.
 else:
     # Convert string-based env vars to integers where needed
     try:
         API_ID = int(API_ID)
-        OWNER_ID = int(OWNER_ID)
+        # --- MODIFIED: Make OWNER_ID optional ---
+        # Try to convert OWNER_ID, but set to None if it's missing or invalid
+        try:
+            OWNER_ID = int(OWNER_ID)
+        except (ValueError, TypeError):
+            logging.warning("OWNER_ID not set or invalid. Admin commands will be disabled.")
+            OWNER_ID = None # Set to None if not provided or invalid
     except ValueError:
-        logging.critical("ERROR: API_ID and OWNER_ID must be integers.")
+        logging.critical("ERROR: API_ID must be an integer.")
         API_ID = None # Set to None to prevent client from starting
 
 # Setup logging
@@ -55,7 +61,8 @@ else:
 
 def is_owner(user_id: int) -> bool:
     """Check if user is the owner"""
-    return user_id == OWNER_ID
+    # --- MODIFIED: Safely check if OWNER_ID is set and matches ---
+    return OWNER_ID is not None and user_id == OWNER_ID
 
 def parse_telegram_link(link):
     """Enhanced URL parsing with better error handling for topic messages"""
@@ -230,9 +237,12 @@ if app:
     @app.on_message(filters.command("start"))
     async def start_command(client, message: Message):
         """Handle /start command"""
-        if not is_owner(message.from_user.id):
-            await message.reply("❌ Access Denied! This bot is private.")
-            return
+        
+        # --- MODIFIED: Removed owner check ---
+        # if not is_owner(message.from_user.id):
+        #     await message.reply("❌ Access Denied! This bot is private.")
+        #     return
+        # --- END MODIFICATION ---
 
         await message.reply(
             "🤖 **Content Saver Bot**\n\n"
@@ -246,9 +256,12 @@ if app:
     @app.on_message(filters.text & ~filters.command("start"))
     async def handle_message(client, message: Message):
         """Handle incoming messages with topic support"""
-        if not is_owner(message.from_user.id):
-            await message.reply("❌ Access Denied!")
-            return
+
+        # --- MODIFIED: Removed owner check ---
+        # if not is_owner(message.from_user.id):
+        #     await message.reply("❌ Access Denied!")
+        #     return
+        # --- END MODIFICATION ---
 
         text = message.text
 
@@ -358,8 +371,9 @@ if app:
     @app.on_message(filters.command("status"))
     async def status_command(client, message: Message):
         """Check bot status"""
+        # --- This command is still protected ---
         if not is_owner(message.from_user.id):
-            await message.reply("❌ Access Denied!")
+            await message.reply("❌ This command is for the bot owner only.")
             return
         
         me = await client.get_me()
@@ -373,8 +387,9 @@ if app:
     @app.on_message(filters.command("test"))
     async def test_command(client, message: Message):
         """Test link parsing"""
+        # --- This command is still protected ---
         if not is_owner(message.from_user.id):
-            await message.reply("❌ Access Denied!")
+            await message.reply("❌ This command is for the bot owner only.")
             return
 
         test_links = [
@@ -401,8 +416,9 @@ if app:
     @app.on_message(filters.command("debug"))
     async def debug_command(client, message: Message):
         """Debug message details"""
+        # --- This command is still protected ---
         if not is_owner(message.from_user.id):
-            await message.reply("❌ Access Denied!")
+            await message.reply("❌ This command is for the bot owner only.")
             return
 
         # Get the message text after the command
@@ -451,4 +467,3 @@ if app:
 # The 'if __name__ == "__main__":' block
 # and 'app.run()' have been removed.
 # The server in 'main.py' now controls the bot's lifecycle.
-
