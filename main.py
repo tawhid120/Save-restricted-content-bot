@@ -3,7 +3,7 @@ import os
 import asyncio
 import aiohttp
 from fastapi import FastAPI, Request, Response
-from pyrogram import types
+from pyrogram import types  # এটি থাকা খুবই গুরুত্বপূর্ণ
 
 # Import app and BOT_TOKEN from your new bot.py file
 try:
@@ -33,7 +33,6 @@ WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}" if BOT_TOKEN else "/webhook"
 FULL_WEBHOOK_URL = f"{WEBHOOK_URL}{WEBHOOK_PATH}" if WEBHOOK_URL and BOT_TOKEN else None
 
 # --- Lazy App Startup ---
-# This prevents Telegram from timing out on Render's slow cold starts
 app_is_running = False
 
 # Initialize the FastAPI server
@@ -49,9 +48,15 @@ async def on_shutdown():
         log.info("Pyrogram client stopped.")
         app_is_running = False
 
-@server.get("/")
+# === সমাধান ১: UptimeRobot (405 Method Not Allowed) সমস্যার সমাধান ===
+# UptimeRobot-এর 'HEAD' রিকোয়েস্ট গ্রহণ করার জন্য methods=["GET", "HEAD"] যোগ করা হলো।
+@server.get("/", methods=["GET", "HEAD"])
 async def health_check():
-    """A simple health check endpoint that Render can ping."""
+    """
+    A simple health check endpoint that Render/UptimeRobot can ping.
+    Explicitly handles GET and HEAD requests to prevent 405 errors.
+    """
+    log.info("Health check ping received.") # লগ যোগ করা হলো যাতে আপনি দেখতে পান UptimeRobot কাজ করছে
     return {"status": "ok", "app_running": app_is_running}
 
 @server.post(WEBHOOK_PATH)
@@ -64,8 +69,7 @@ async def webhook_listener(request: Request):
         return Response(status_code=500)
         
     try:
-        # --- FIX #1: LAZY STARTUP ---
-        # Start the app *only* on the first request
+        # --- LAZY STARTUP ---
         if not app_is_running:
             log.info("First request received, starting Pyrogram client...")
             await app.start()
@@ -75,20 +79,21 @@ async def webhook_listener(request: Request):
         # Get the update data from the request body
         json_data = await request.json()
         
-                # Convert the raw JSON dict into a Pyrogram Update object
-        # FIX: 'app.read_update' এর বদলে 'types.Update.read' ব্যবহার করুন
-        update = types.Update.read(json_data) 
+        # === সমাধান ২: মেসেজ প্রসেসিং (AttributeError) সমস্যার সমাধান ===
+        # 'app.read_update' বা 'Update.read' নামে কোনো ফাংশন নেই।
+        # raw dictionary (json_data) থেকে Pyrogram Update অবজেক্ট তৈরির সঠিক উপায়:
+        update = types.Update.from_dict(json_data)
         
         # Process the Update object in a background task
         asyncio.create_task(app.process_update(update))
-
-        # --- FIX #2: ALWAYS RETURN 200 OK ---
-        # ALWAYS return 200 OK immediately to prevent Telegram resends.
+        
+        # --- ALWAYS RETURN 200 OK ---
         return Response(status_code=200)
         
     except Exception as e:
+        # এখানে কোনো এরর হলেও টেলিগ্রামকে 200 OK পাঠানো হচ্ছে,
+        # যাতে টেলিগ্রাম বার বার একই মেসেজ না পাঠায়।
         log.error(f"Error in webhook_listener: {e}")
-        # Even on a critical error, tell Telegram "OK" so it stops resending.
         return Response(status_code=200)
 
 @server.get(f"/setup/{BOT_TOKEN}")
@@ -123,5 +128,4 @@ async def setup_webhook():
     except Exception as e:
         log.error(f"Error setting webhook: {e}")
         return {"ok": False, "error": str(e)}
-
 
