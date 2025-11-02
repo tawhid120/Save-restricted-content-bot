@@ -407,7 +407,7 @@ async def handle_copy_error(status_msg: Message, error: Exception) -> None:
 
 if app:
     
-    @app.on_message(filters.command("start") & filters.private & ~filters.me)
+    @app.on_message(filters.command("start") & (filters.private | filters.group) & ~filters.me)
     async def start_command(client: Client, message: Message):
         """
         Handle /start command - Display welcome message and usage instructions.
@@ -430,7 +430,7 @@ if app:
         logger.info(f"User {message.from_user.id} started the bot")
     
     
-    @app.on_message(filters.text & ~filters.command("start") & filters.private & ~filters.me)
+    @app.on_message(filters.text & ~filters.command("start") & (filters.private | filters.group) & ~filters.me)
     async def handle_message_link(client: Client, message: Message):
         """
         Handle incoming Telegram message links.
