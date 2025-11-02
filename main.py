@@ -49,15 +49,16 @@ async def on_shutdown():
         app_is_running = False
 
 # === সমাধান ১: UptimeRobot (405 Method Not Allowed) সমস্যার সমাধান ===
-# UptimeRobot-এর 'HEAD' রিকোয়েস্ট গ্রহণ করার জন্য methods=["GET", "HEAD"] যোগ করা হলো।
-@server.get("/", methods=["GET", "HEAD"])
+# .get() ডেকোরেটর 'methods' আর্গুমেন্ট সাপোর্ট করে না।
+# তাই আমরা .api_route() ব্যবহার করছি যা GET এবং HEAD উভয়ই সাপোর্ট করে।
+@server.api_route("/", methods=["GET", "HEAD"])
 async def health_check():
     """
     A simple health check endpoint that Render/UptimeRobot can ping.
-    Explicitly handles GET and HEAD requests to prevent 405 errors.
+    Handles both GET and HEAD requests.
     """
-    log.info("Health check ping received.") # লগ যোগ করা হলো যাতে আপনি দেখতে পান UptimeRobot কাজ করছে
-    return {"status": "ok", "app_running": app_is_running}
+    log.info("Health check ping received.")
+    return {"status": "ok", "app_running": app_running}
 
 @server.post(WEBHOOK_PATH)
 async def webhook_listener(request: Request):
