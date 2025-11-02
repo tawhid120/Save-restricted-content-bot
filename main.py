@@ -3,7 +3,7 @@ import os
 import asyncio
 import aiohttp
 from fastapi import FastAPI, Request, Response
-from pyrogram import types  # এটি থাকা খুবই গুরুত্বপূর্ণ
+from pyrogram import types  # এটি ইম্পোর্ট করা ভালো অভ্যাস
 
 # Import app and BOT_TOKEN from your new bot.py file
 try:
@@ -48,16 +48,17 @@ async def on_shutdown():
         log.info("Pyrogram client stopped.")
         app_is_running = False
 
-# === সমাধান ১: UptimeRobot (TypeError এবং 405 Method Not Allowed) ===
-# .get() এর বদলে .api_route() ব্যবহার করা হয়েছে, যা GET এবং HEAD উভয়ই সাপোর্ট করে।
+# === সমাধান ১: UptimeRobot (405 Method Not Allowed + TypeError) ===
+# @server.get() এর বদলে @server.api_route() ব্যবহার করা হয়েছে,
+# যা GET এবং HEAD উভয় রিকোয়েস্ট সাপোর্ট করে।
 @server.api_route("/", methods=["GET", "HEAD"])
 async def health_check():
     """
     A simple health check endpoint that Render/UptimeRobot can ping.
     Handles both GET and HEAD requests.
     """
-    # === সমাধান ৩: NameError (app_is_running is not defined) ===
-    # ফাংশনকে বলে দেওয়া হলো যে 'app_is_running' একটি গ্লোবাল ভেরিয়েবল।
+    # === সমাধান ২: NameError (app_is_running is not defined) ===
+    # health_check ফাংশনকে global ভেরিয়েবলটি চিনিয়ে দেওয়া হলো।
     global app_is_running
     
     log.info("Health check ping received.")
@@ -83,12 +84,10 @@ async def webhook_listener(request: Request):
         # Get the update data from the request body
         json_data = await request.json()
         
-        # === সমাধান ২: মেসেজ প্রসেসিং (AttributeError) ===
-        # raw dictionary (json_data) থেকে Pyrogram Update অবজেক্ট তৈরির সঠিক উপায়।
-        update = types.Update.from_dict(json_data)
-        
-        # Process the Update object in a background task
-        asyncio.create_task(app.process_update(update))
+        # === সমাধান ৩: মেসেজ প্রসেসিং (AttributeError: 'Update' has no attribute 'from_dict') ===
+        # Pyrogram-এর ডকুমেন্টেশন অনুযায়ী, raw JSON ডেটা প্রসেস করার
+        # সঠিক মেথড হলো 'feed_update', যা সরাসরি 'dict' গ্রহণ করে।
+        asyncio.create_task(app.feed_update(json_data))
         
         # --- ALWAYS RETURN 200 OK ---
         return Response(status_code=200)
