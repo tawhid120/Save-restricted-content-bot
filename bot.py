@@ -212,11 +212,14 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
         Tuple of (success: bool, error: Optional[str])
     """
     try:
+        # --- FIX: Pass entities and caption_entities to preserve formatting ---
+        
         # Text message
         if original_msg.text:
             await client.send_message(
                 chat_id=to_chat_id,
-                text=original_msg.text
+                text=original_msg.text,
+                entities=original_msg.entities  # <-- ADDED to preserve links/formatting
             )
         
         # Photo
@@ -224,7 +227,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_photo(
                 chat_id=to_chat_id,
                 photo=original_msg.photo.file_id,
-                caption=original_msg.caption or ""
+                caption=original_msg.caption or "",
+                caption_entities=original_msg.caption_entities  # <-- ADDED
             )
         
         # Video
@@ -232,7 +236,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_video(
                 chat_id=to_chat_id,
                 video=original_msg.video.file_id,
-                caption=original_msg.caption or ""
+                caption=original_msg.caption or "",
+                caption_entities=original_msg.caption_entities  # <-- ADDED
             )
         
         # Document
@@ -240,7 +245,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_document(
                 chat_id=to_chat_id,
                 document=original_msg.document.file_id,
-                caption=original_msg.caption or ""
+                caption=original_msg.caption or "",
+                caption_entities=original_msg.caption_entities  # <-- ADDED
             )
         
         # Audio
@@ -248,7 +254,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_audio(
                 chat_id=to_chat_id,
                 audio=original_msg.audio.file_id,
-                caption=original_msg.caption or ""
+                caption=original_msg.caption or "",
+                caption_entities=original_msg.caption_entities  # <-- ADDED
             )
         
         # Voice message
@@ -256,7 +263,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_voice(
                 chat_id=to_chat_id,
                 voice=original_msg.voice.file_id,
-                caption=original_msg.caption or ""
+                caption=original_msg.caption or "",
+                caption_entities=original_msg.caption_entities  # <-- ADDED
             )
         
         # Sticker
@@ -271,7 +279,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_animation(
                 chat_id=to_chat_id,
                 animation=original_msg.animation.file_id,
-                caption=original_msg.caption or ""
+                caption=original_msg.caption or "",
+                caption_entities=original_msg.caption_entities  # <-- ADDED
             )
         
         # Unsupported type
