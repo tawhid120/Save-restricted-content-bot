@@ -48,17 +48,20 @@ async def on_shutdown():
         log.info("Pyrogram client stopped.")
         app_is_running = False
 
-# === সমাধান ১: UptimeRobot (405 Method Not Allowed) সমস্যার সমাধান ===
-# .get() ডেকোরেটর 'methods' আর্গুমেন্ট সাপোর্ট করে না।
-# তাই আমরা .api_route() ব্যবহার করছি যা GET এবং HEAD উভয়ই সাপোর্ট করে।
+# === সমাধান ১: UptimeRobot (TypeError এবং 405 Method Not Allowed) ===
+# .get() এর বদলে .api_route() ব্যবহার করা হয়েছে, যা GET এবং HEAD উভয়ই সাপোর্ট করে।
 @server.api_route("/", methods=["GET", "HEAD"])
 async def health_check():
     """
     A simple health check endpoint that Render/UptimeRobot can ping.
     Handles both GET and HEAD requests.
     """
+    # === সমাধান ৩: NameError (app_is_running is not defined) ===
+    # ফাংশনকে বলে দেওয়া হলো যে 'app_is_running' একটি গ্লোবাল ভেরিয়েবল।
+    global app_is_running
+    
     log.info("Health check ping received.")
-    return {"status": "ok", "app_running": app_running}
+    return {"status": "ok", "app_running": app_is_running}
 
 @server.post(WEBHOOK_PATH)
 async def webhook_listener(request: Request):
@@ -80,9 +83,8 @@ async def webhook_listener(request: Request):
         # Get the update data from the request body
         json_data = await request.json()
         
-        # === সমাধান ২: মেসেজ প্রসেসিং (AttributeError) সমস্যার সমাধান ===
-        # 'app.read_update' বা 'Update.read' নামে কোনো ফাংশন নেই।
-        # raw dictionary (json_data) থেকে Pyrogram Update অবজেক্ট তৈরির সঠিক উপায়:
+        # === সমাধান ২: মেসেজ প্রসেসিং (AttributeError) ===
+        # raw dictionary (json_data) থেকে Pyrogram Update অবজেক্ট তৈরির সঠিক উপায়।
         update = types.Update.from_dict(json_data)
         
         # Process the Update object in a background task
@@ -92,8 +94,6 @@ async def webhook_listener(request: Request):
         return Response(status_code=200)
         
     except Exception as e:
-        # এখানে কোনো এরর হলেও টেলিগ্রামকে 200 OK পাঠানো হচ্ছে,
-        # যাতে টেলিগ্রাম বার বার একই মেসেজ না পাঠায়।
         log.error(f"Error in webhook_listener: {e}")
         return Response(status_code=200)
 
