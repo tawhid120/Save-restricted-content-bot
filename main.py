@@ -75,12 +75,13 @@ async def webhook_listener(request: Request):
         # Get the update data from the request body
         json_data = await request.json()
         
-        # Convert the raw JSON dict into a Pyrogram Update object
-        update = await app.read_update(json_data)
+                # Convert the raw JSON dict into a Pyrogram Update object
+        # FIX: 'app.read_update' এর বদলে 'types.Update.read' ব্যবহার করুন
+        update = types.Update.read(json_data) 
         
         # Process the Update object in a background task
         asyncio.create_task(app.process_update(update))
-        
+
         # --- FIX #2: ALWAYS RETURN 200 OK ---
         # ALWAYS return 200 OK immediately to prevent Telegram resends.
         return Response(status_code=200)
