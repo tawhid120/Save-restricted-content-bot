@@ -5,14 +5,14 @@ A professional webhook-based bot that saves content from Telegram messages.
 
 Features:
 - Supports PUBLIC channels/groups only (v3.0)
-- Handles Polls and Quizzes (v3.0.1 - Fix)
+- Handles Polls and Quizzes (v3.0.3 - Fix)
 - Batch/Range post saving (v3.0 - Limit 100)
 - Batch cancellation feature (v3.0 - /cancel)
 - Robust error handling
 - Webhook deployment ready
 
 Author: Your Name
-Version: 3.0.1 (Public Only, Quiz/Poll Fix, Cancel, English UI, 100 Limit)
+Version: 3.0.3 (Public Only, Quiz/Poll Fix, Cancel, English UI, 100 Limit)
 License: MIT
 """
 
@@ -21,6 +21,7 @@ import os
 import re
 import asyncio
 from typing import Optional, Tuple, Dict, Any
+from datetime import datetime, timezone
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import ParseMode, PollType
@@ -278,22 +279,23 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
                 parse_mode=ParseMode.HTML
             )
         
-        # --- MODIFIED: Handle Polls & Quizzes (v3.0.1 FIX) ---
+        # --- MODIFIED: Handle Polls & Quizzes (v3.0.3 FIX) ---
         elif original_msg.poll:
             # Extract common poll options
             poll_options = [opt.text for opt in original_msg.poll.options]
 
             # --- FIX: Handle mutually exclusive open_period and close_date ---
-            # The send_poll method cannot accept both parameters at the same time.
-            # We must prioritize one, just like the Telegram client does.
             poll_open_period = None
             poll_close_date = None
             
             if original_msg.poll.open_period:
                 poll_open_period = original_msg.poll.open_period
             elif original_msg.poll.close_date:
-                poll_close_date = original_msg.poll.close_date
-            # --- END FIX ---
+                # --- v3.0.2 FIX: Check if the close_date is in the past ---
+                now_utc = datetime.now(timezone.utc)
+                if original_msg.poll.close_date > now_utc:
+                    poll_close_date = original_msg.poll.close_date
+            # --- END v3.0.2 FIX ---
 
             # Check if it's a Quiz
             if original_msg.poll.type == PollType.QUIZ:
@@ -304,10 +306,15 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
                     is_anonymous=original_msg.poll.is_anonymous,
                     type="quiz",  # Explicitly set type as quiz
                     correct_option_id=original_msg.poll.correct_option_id,
-                    explanation=original_msg.poll.explanation.html if original_msg.poll.explanation else None,
-                    explanation_parse_mode=ParseMode.HTML,
-                    open_period=poll_open_period, # <-- MODIFIED
-                    close_date=poll_close_date  # <-- MODIFIED
+                    
+                    # --- FIX v3.0.3: Use explanation string and entities ---
+                    explanation=original_msg.poll.explanation,
+                    explanation_entities=original_msg.poll.explanation_entities,
+                    # explanation_parse_mode=ParseMode.HTML, # <-- This was the bug
+                    # --- END FIX ---
+                    
+                    open_period=poll_open_period,
+                    close_date=poll_close_date
                 )
             # Check if it's a Regular Poll
             elif original_msg.poll.type == PollType.REGULAR:
@@ -318,8 +325,14 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
                     is_anonymous=original_msg.poll.is_anonymous,
                     type="regular", # Explicitly set type as regular
                     allows_multiple_answers=original_msg.poll.allows_multiple_answers,
-                    open_period=poll_open_period, # <-- MODIFIED
-                    close_date=poll_close_date  # <-- MODIFIED
+                    
+                    # --- FIX v3.0.3: Also apply to regular polls ---
+                    explanation=original_msg.poll.explanation,
+                    explanation_entities=original_msg.poll.explanation_entities,
+                    # --- END FIX ---
+
+                    open_period=poll_open_period, 
+                    close_date=poll_close_date
                 )
             else:
                 # Fallback for any other unknown poll type
@@ -471,7 +484,7 @@ if app:
         This command is accessible to all users.
         """
         welcome_text = (
-            "🤖 **Content Saver Bot** (v3.0.1)\n\n"
+            "🤖 **Content Saver Bot** (v3.0.3)\n\n" # <-- Version updated
             "📋 **How to use:**\n"
             "• Send any **public** Telegram message link\n"
             "• Bot will fetch and forward the content to you\n\n"
@@ -821,4 +834,4 @@ if app:
 __all__ = ['app', 'BOT_TOKEN']
 BOT_TOKEN = Config.BOT_TOKEN
 
-logger.info("Bot module v3.0.1 (QuizFix) loaded successfully")
+logger.info("Bot module v3.0.3 (QuizFix) loaded successfully")
