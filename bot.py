@@ -9,18 +9,21 @@ Features:
 - Multiple media types support
 - Robust error handling
 - Webhook deployment ready
+- --- NEW: Batch/Range post saving ---
 
 Author: Your Name
-Version: 2.1.0 (Fixed spam loop)
+Version: 2.3.0 (Fixed formatting loss & added /batch_download command)
 License: MIT
 """
 
 import logging
 import os
 import re
+import asyncio  # --- NEW ---: Added for batch processing delay
 from typing import Optional, Tuple, Dict, Any
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.enums import ParseMode  # --- UPDATED: Added for formatting fix ---
 
 # ==================== CONFIGURATION ====================
 
@@ -129,15 +132,12 @@ def is_owner(user_id: int) -> bool:
     return Config.OWNER_ID is not None and user_id == Config.OWNER_ID
 
 
+# --- MODIFIED: Updated parse_telegram_link to support ranges ---
 def parse_telegram_link(link: str) -> Optional[Dict[str, Any]]:
     """
     Parse Telegram message links and extract relevant information.
     
-    Supports the following link formats:
-    - Public channel: https://t.me/channel/123
-    - Private channel: https://t.me/c/1234567890/123
-    - Public topic: https://t.me/channel/topic_id/message_id
-    - Private topic: https://t.me/c/chat_id/topic_id/message_id
+    Supports single links and batch/range links (e.g., /100-110).
     
     Args:
         link: Telegram message link
@@ -145,10 +145,25 @@ def parse_telegram_link(link: str) -> Optional[Dict[str, Any]]:
     Returns:
         Dict with parsed information or None if link is invalid
     """
-    link = link.strip()
+    link = link.strip().replace(" ", "") # Remove spaces
     
     # Define regex patterns for different link types
+    # Batch/range patterns MUST come before single patterns
     patterns = [
+        # --- NEW BATCH/RANGE PATTERNS ---
+        # Private topic batch: https://t.me/c/1234567890/123/456-460
+        (r"https?://t\.me/c/(\d+)/(\d+)/(\d+)-(\d+)$", "private_topic_batch"),
+        
+        # Public topic batch: https://t.me/channel/123/456-460
+        (r"https?://t\.me/([^/]+)/(\d+)/(\d+)-(\d+)$", "public_topic_batch"),
+        
+        # Private channel batch: https://t.me/c/1234567890/123-130
+        (r"https?://t\.me/c/(\d+)/(\d+)-(\d+)$", "private_batch"),
+        
+        # Public channel batch: https://t.me/channel/123-130
+        (r"https?://t\.me/([^/]+)/(\d+)-(\d+)$", "public_batch"),
+        
+        # --- ORIGINAL SINGLE POST PATTERNS ---
         # Private topic: https://t.me/c/1234567890/123/456
         (r"https?://t\.me/c/(\d+)/(\d+)/(\d+)$", "private_topic"),
         
@@ -156,52 +171,97 @@ def parse_telegram_link(link: str) -> Optional[Dict[str, Any]]:
         (r"https?://t\.me/c/(\d+)/(\d+)$", "private"),
         
         # Public topic: https://t.me/channel/123/456
-        (r"https?://t\.me/([^/]+)/(\d+)/(\d+)$", "public_topic"),
+        (r"https://t\.me/([^/]+)/(\d+)/(\d+)$", "public_topic"),
         
         # Public channel: https://t.me/channel/123
-        (r"https?://t\.me/([^/]+)/(\d+)$", "public")
+        (r"https://t\.me/([^/]+)/(\d+)$", "public")
     ]
     
     for pattern, link_type in patterns:
         match = re.match(pattern, link)
         if match:
-            if link_type == "public_topic":
+            # --- HANDLE BATCH TYPES ---
+            if link_type == "public_topic_batch":
                 return {
                     "type": "public_topic",
                     "channel": match.group(1),
                     "topic_id": int(match.group(2)),
-                    "message_id": int(match.group(3))
+                    "message_id_start": int(match.group(3)),
+                    "message_id_end": int(match.group(4))
                 }
-            elif link_type == "private_topic":
+            elif link_type == "private_topic_batch":
                 return {
                     "type": "private_topic",
-                    "chat_id": int(f"-100{match.group(1)}"),  # Convert to full chat ID
+                    "chat_id": int(f"-100{match.group(1)}"),
                     "topic_id": int(match.group(2)),
-                    "message_id": int(match.group(3))
+                    "message_id_start": int(match.group(3)),
+                    "message_id_end": int(match.group(4))
                 }
-            elif link_type == "private":
+            elif link_type == "private_batch":
                 return {
                     "type": "private",
                     "chat_id": int(f"-100{match.group(1)}"),
-                    "message_id": int(match.group(2)),
-                    "topic_id": None
+                    "topic_id": None,
+                    "message_id_start": int(match.group(2)),
+                    "message_id_end": int(match.group(3))
                 }
-            elif link_type == "public":
+            elif link_type == "public_batch":
                 return {
                     "type": "public",
                     "channel": match.group(1),
-                    "message_id": int(match.group(2)),
-                    "topic_id": None
+                    "topic_id": None,
+                    "message_id_start": int(match.group(2)),
+                    "message_id_end": int(match.group(3))
+                }
+                
+            # --- HANDLE ORIGINAL SINGLE TYPES (Modified for consistency) ---
+            elif link_type == "public_topic":
+                msg_id = int(match.group(3))
+                return {
+                    "type": "public_topic",
+                    "channel": match.group(1),
+                    "topic_id": int(match.group(2)),
+                    "message_id_start": msg_id,
+                    "message_id_end": msg_id  # Start and end are the same
+                }
+            elif link_type == "private_topic":
+                msg_id = int(match.group(3))
+                return {
+                    "type": "private_topic",
+                    "chat_id": int(f"-100{match.group(1)}"),
+                    "topic_id": int(match.group(2)),
+                    "message_id_start": msg_id,
+                    "message_id_end": msg_id
+                }
+            elif link_type == "private":
+                msg_id = int(match.group(2))
+                return {
+                    "type": "private",
+                    "chat_id": int(f"-100{match.group(1)}"),
+                    "topic_id": None,
+                    "message_id_start": msg_id,
+                    "message_id_end": msg_id
+                }
+            elif link_type == "public":
+                msg_id = int(match.group(2))
+                return {
+                    "type": "public",
+                    "channel": match.group(1),
+                    "topic_id": None,
+                    "message_id_start": msg_id,
+                    "message_id_end": msg_id
                 }
     
     return None
 
 
+# --- UPDATED: Function modified to preserve formatting ---
 async def send_message_by_type(client: Client, original_msg: Message, to_chat_id: int) -> Tuple[bool, Optional[str]]:
     """
     Send a message by determining its type and using the appropriate method.
     
-    This function handles all common Telegram message types.
+    This function handles all common Telegram message types
+    and preserves rich text formatting (bold, italic, links).
     
     Args:
         client: Pyrogram client instance
@@ -212,14 +272,12 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
         Tuple of (success: bool, error: Optional[str])
     """
     try:
-        # --- FIX: Pass entities and caption_entities to preserve formatting ---
-        
         # Text message
         if original_msg.text:
             await client.send_message(
                 chat_id=to_chat_id,
-                text=original_msg.text,
-                entities=original_msg.entities  # <-- ADDED to preserve links/formatting
+                text=original_msg.text.html,
+                parse_mode=ParseMode.HTML
             )
         
         # Photo
@@ -227,8 +285,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_photo(
                 chat_id=to_chat_id,
                 photo=original_msg.photo.file_id,
-                caption=original_msg.caption or "",
-                caption_entities=original_msg.caption_entities  # <-- ADDED
+                caption=original_msg.caption.html if original_msg.caption else None,
+                parse_mode=ParseMode.HTML
             )
         
         # Video
@@ -236,8 +294,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_video(
                 chat_id=to_chat_id,
                 video=original_msg.video.file_id,
-                caption=original_msg.caption or "",
-                caption_entities=original_msg.caption_entities  # <-- ADDED
+                caption=original_msg.caption.html if original_msg.caption else None,
+                parse_mode=ParseMode.HTML
             )
         
         # Document
@@ -245,8 +303,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_document(
                 chat_id=to_chat_id,
                 document=original_msg.document.file_id,
-                caption=original_msg.caption or "",
-                caption_entities=original_msg.caption_entities  # <-- ADDED
+                caption=original_msg.caption.html if original_msg.caption else None,
+                parse_mode=ParseMode.HTML
             )
         
         # Audio
@@ -254,8 +312,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_audio(
                 chat_id=to_chat_id,
                 audio=original_msg.audio.file_id,
-                caption=original_msg.caption or "",
-                caption_entities=original_msg.caption_entities  # <-- ADDED
+                caption=original_msg.caption.html if original_msg.caption else None,
+                parse_mode=ParseMode.HTML
             )
         
         # Voice message
@@ -263,8 +321,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_voice(
                 chat_id=to_chat_id,
                 voice=original_msg.voice.file_id,
-                caption=original_msg.caption or "",
-                caption_entities=original_msg.caption_entities  # <-- ADDED
+                caption=original_msg.caption.html if original_msg.caption else None,
+                parse_mode=ParseMode.HTML
             )
         
         # Sticker
@@ -279,8 +337,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
             await client.send_animation(
                 chat_id=to_chat_id,
                 animation=original_msg.animation.file_id,
-                caption=original_msg.caption or "",
-                caption_entities=original_msg.caption_entities  # <-- ADDED
+                caption=original_msg.caption.html if original_msg.caption else None,
+                parse_mode=ParseMode.HTML
             )
         
         # Unsupported type
@@ -299,13 +357,13 @@ async def copy_message_with_fallback(
     from_chat_id: int,
     message_id: int,
     to_chat_id: int,
-    message_thread_id: Optional[int] = None
+    message_thread_id: Optional[int] = None # This parameter is kept as requested
 ) -> Tuple[Optional[Message], Optional[str]]:
     """
     Copy a message with multiple fallback methods.
     
     This function attempts to copy a message using three methods in order:
-    1. Manual copy by message type (most reliable)
+    1. Manual copy by message type (most reliable, preserves formatting)
     2. Pyrogram's copy_message method
     3. Forward message as last resort
     
@@ -330,7 +388,7 @@ async def copy_message_with_fallback(
         if not original_msg.text and not original_msg.caption and not original_msg.media:
             return None, "Message is empty"
         
-        # Method 1: Try manual copy by type (most reliable)
+        # Method 1: Try manual copy by type (now preserves formatting)
         success, error = await send_message_by_type(client, original_msg, to_chat_id)
         if success:
             logger.info(f"Successfully copied message {message_id} using manual method")
@@ -407,7 +465,7 @@ async def handle_copy_error(status_msg: Message, error: Exception) -> None:
 
 if app:
     
-    @app.on_message(filters.command("start") & (filters.private | filters.group) & ~filters.me)
+    @app.on_message(filters.command("start") & filters.private & ~filters.me)
     async def start_command(client: Client, message: Message):
         """
         Handle /start command - Display welcome message and usage instructions.
@@ -420,26 +478,53 @@ if app:
             "• Send any Telegram message link\n"
             "• Bot will fetch and forward the content to you\n"
             "• Supports regular channels and topic/forum messages\n\n"
-            "📌 **Supported formats:**\n"
-            "• Text, photos, videos, documents\n"
-            "• Audio, voice messages, stickers\n"
-            "• Animations and GIFs\n\n"
+            "**--- NEW: Batch Saving ---**\n"
+            "Send links in `from-to` format:\n"
+            "`https://t.me/channel/100-110`\n"
+            "(Maximum 25 posts at a time)\n\n"
+            "For more details, send /batch_download\n\n"
             "✅ **Ready to save content!**"
         )
         await message.reply(welcome_text)
         logger.info(f"User {message.from_user.id} started the bot")
     
     
-    @app.on_message(filters.text & ~filters.command("start") & (filters.private | filters.group) & ~filters.me)
+    # --- NEW: Added /batch_download command handler ---
+    @app.on_message(filters.command("batch_download") & filters.private & ~filters.me)
+    async def batch_command(client: Client, message: Message):
+        """
+        Handle /batch_download command - Explain how to use the batch feature.
+        
+        This command is accessible to all users.
+        """
+        batch_help_text = (
+            "📤 **ব্যাচ সেভ (Batch Save) নির্দেশিকা**\n\n"
+            "একাধিক পোস্ট একসাথে সেভ করতে, লিঙ্কটি `from-to` ফরম্যাটে পাঠান।\n\n"
+            "**পাবলিক চ্যানেল/গ্রুপ:**\n"
+            "`https://t.me/channel_username/1001-1010`\n\n"
+            "**প্রাইভেট চ্যানেল/গ্রুপ:**\n"
+            "`https://t.me/c/1234567890/101-120`\n\n"
+            "**টপিক সহ (পাবলিক):**\n"
+            "`https://t.me/channel_username/topic_id/50-60`\n\n"
+            "**টপিক সহ (প্রাইভেট):**\n"
+            "`https://t.me/c/123456789/topic_id/200-205`\n\n"
+            "ℹ️ **দ্রষ্টব্য:** রেঞ্জের মধ্যে স্পেস থাকলেও (`101 - 120`) এটি কাজ করবে। নিরাপত্তার জন্য সর্বোচ্চ **২৫টি** পোস্ট একসাথে প্রসেস করা যাবে।"
+        )
+        await message.reply(batch_help_text)
+        logger.info(f"User {message.from_user.id} requested batch help")
+    
+    
+    # --- MODIFIED: Rewritten to handle single and batch links ---
+    @app.on_message(filters.text & ~filters.command(["start", "batch_download", "status", "test", "debug"]) & filters.private & ~filters.me)
     async def handle_message_link(client: Client, message: Message):
         """
-        Handle incoming Telegram message links.
+        Handle incoming Telegram message links (single or batch).
         
         This is the main functionality of the bot. It:
         1. Validates the message contains a Telegram link
-        2. Parses the link to extract chat and message information
-        3. Attempts to copy the message to the user
-        4. Provides appropriate feedback
+        2. Parses the link (e.g., /100 or /100-110)
+        3. Loops through the range and copies messages
+        4. Provides a final report
         """
         text = message.text
         
@@ -471,7 +556,20 @@ if app:
                 return
             
             link_type = parsed_link["type"]
-            msg_id = parsed_link["message_id"]
+            msg_start = parsed_link["message_id_start"]
+            msg_end = parsed_link["message_id_end"]
+            
+            # --- BATCH/RANGE CHECKS ---
+            BATCH_LIMIT = 25  # Set a reasonable limit
+            
+            if msg_start > msg_end:
+                await status_msg.edit("❌ Error: 'From' ID must be smaller than 'To' ID.")
+                return
+            
+            num_messages = (msg_end - msg_start) + 1
+            if num_messages > BATCH_LIMIT:
+                await status_msg.edit(f"❌ Error: Range too large. Max **{BATCH_LIMIT}** posts at a time. You requested {num_messages}.")
+                return
             
             # Determine chat ID based on link type
             if link_type in ["public_topic", "public"]:
@@ -482,25 +580,52 @@ if app:
             # Extract topic ID if present
             topic_id = parsed_link.get("topic_id")
             
-            # Attempt to copy the message
-            copied_msg, error = await copy_message_with_fallback(
-                client=client,
-                from_chat_id=chat_id,
-                message_id=msg_id,
-                to_chat_id=message.chat.id,
-                message_thread_id=topic_id
-            )
+            # --- PROCESS THE BATCH (even if it's just 1) ---
+            success_count = 0
+            fail_count = 0
+            last_error = None
             
-            # Handle result
-            if error:
-                await handle_copy_error(status_msg, Exception(error))
-                logger.warning(f"Failed to copy message: {error}")
+            if num_messages > 1:
+                await status_msg.edit(f"🔄 Processing {num_messages} messages...")
+
+            for msg_id in range(msg_start, msg_end + 1):
+                copied_msg, error = await copy_message_with_fallback(
+                    client=client,
+                    from_chat_id=chat_id,
+                    message_id=msg_id,
+                    to_chat_id=message.chat.id,
+                    message_thread_id=topic_id # Passing this parameter as requested
+                )
+                
+                if error:
+                    fail_count += 1
+                    last_error = error
+                    logger.warning(f"Failed to copy message {msg_id}: {error}")
+                else:
+                    success_count += 1
+                    logger.info(f"Successfully copied message {msg_id} for user {message.from_user.id}")
+                
+                # Add a small delay to prevent flood waits
+                if num_messages > 1:
+                    await asyncio.sleep(0.5) 
+            
+            # --- FINAL REPORT ---
+            if num_messages == 1:
+                if success_count == 1:
+                    success_msg = "✅ Content saved successfully!"
+                    if topic_id:
+                        success_msg += f" (from topic {topic_id})"
+                    await status_msg.edit(success_msg)
+                else:
+                    # Show the specific error for the single failed message
+                    await handle_copy_error(status_msg, Exception(last_error))
             else:
-                success_msg = "✅ Content saved successfully!"
-                if topic_id:
-                    success_msg += f" (from topic {topic_id})"
-                await status_msg.edit(success_msg)
-                logger.info(f"Successfully copied message {msg_id} for user {message.from_user.id}")
+                # Batch summary
+                await status_msg.edit(
+                    f"✅ **Batch Complete**\n\n"
+                    f"• Successfully saved: {success_count}\n"
+                    f"• Failed to save: {fail_count}"
+                )
         
         except Exception as e:
             await handle_copy_error(status_msg, e) # Use our handler to check for non-critical errors
@@ -549,10 +674,16 @@ if app:
         
         # Sample test links
         test_links = [
-            "https://t.me/freecoursebioc1/2/203",   # Public topic
-            "https://t.me/c/1234567890/123/456",    # Private topic
+            # --- NEW BATCH LINKS ---
+            "https://t.me/freecoursebioc1/2/203-205",   # Public topic batch
+            "https://t.me/c/1234567890/123/456-457",    # Private topic batch
+            "https://t.me/mychannel/123-125",           # Public channel batch
+            "https://t.me/c/1234567890/123-124",         # Private channel batch
+            
+            # --- ORIGINAL SINGLE LINKS ---
             "https://t.me/mychannel/123",           # Public channel
-            "https://t.me/c/1234567890/123"         # Private channel
+            "https://t.me/c/1234567890/123",         # Private channel
+            "https://t.me/freecoursebioc1/2/203",   # Public topic
         ]
         
         result = "🧪 **Link Parsing Test Results:**\n\n"
@@ -565,7 +696,8 @@ if app:
                 result += f"   **Type:** {parsed['type']}\n"
                 if 'topic_id' in parsed and parsed['topic_id']:
                     result += f"   **Topic ID:** {parsed['topic_id']}\n"
-                result += f"   **Message ID:** {parsed['message_id']}\n\n"
+                result += f"   **Msg Start:** {parsed['message_id_start']}\n"
+                result += f"   **Msg End:** {parsed['message_id_end']}\n\n"
             else:
                 result += f"❌ Failed to parse\n   `{link}`\n\n"
         
@@ -592,7 +724,8 @@ if app:
         if not text:
             await message.reply(
                 "**Usage:** `/debug <telegram_link>`\n\n"
-                "**Example:** `/debug https://t.me/channel/123`"
+                "**Example:** `/debug https://t.me/channel/123`\n"
+                "**Or:** `/debug https://t.me/channel/123-125`"
             )
             return
         
@@ -602,7 +735,10 @@ if app:
         if not parsed:
             await message.reply("❌ Invalid link format")
             return
-        
+            
+        # --- MODIFIED: Use msg_start for debug ---
+        msg_id_to_debug = parsed["message_id_start"] # Just debug the first message in a range
+            
         try:
             # Determine chat ID
             if parsed["type"] in ["public_topic", "public"]:
@@ -610,10 +746,8 @@ if app:
             else:
                 chat_id = parsed["chat_id"]
             
-            msg_id = parsed["message_id"]
-            
             # Fetch message details
-            original_msg = await client.get_messages(chat_id, msg_id)
+            original_msg = await client.get_messages(chat_id, msg_id_to_debug)
             
             if not original_msg:
                 await message.reply("❌ Message not found or bot doesn't have access")
@@ -621,16 +755,17 @@ if app:
             
             # Build debug information
             debug_info = (
-                "🔍 **Message Debug Information**\n\n"
+                "🔍 **Link Debug Information**\n\n"
                 f"**Link Type:** {parsed['type']}\n"
                 f"**Chat ID:** `{chat_id}`\n"
-                f"**Message ID:** `{msg_id}`\n"
+                f"**Msg Start:** `{parsed['message_id_start']}`\n"
+                f"**Msg End:** `{parsed['message_id_end']}`\n"
             )
             
             if 'topic_id' in parsed and parsed['topic_id']:
                 debug_info += f"**Topic ID:** `{parsed['topic_id']}`\n"
             
-            debug_info += f"\n**Content Analysis:**\n"
+            debug_info += f"\n**Content Analysis (for Msg ID: {msg_id_to_debug}):**\n"
             debug_info += f"• Has Text: {'✅' if original_msg.text else '❌'}\n"
             debug_info += f"• Has Caption: {'✅' if original_msg.caption else '❌'}\n"
             debug_info += f"• Has Media: {'✅' if original_msg.media else '❌'}\n"
@@ -639,7 +774,7 @@ if app:
                 debug_info += f"• Media Type: {original_msg.media.value}\n"
             
             await message.reply(debug_info)
-            logger.info(f"Debug command executed for message {msg_id}")
+            logger.info(f"Debug command executed for link: {text}")
         
         except Exception as e:
             await message.reply(f"❌ Debug error: {str(e)}")
@@ -653,5 +788,3 @@ __all__ = ['app', 'BOT_TOKEN']
 BOT_TOKEN = Config.BOT_TOKEN
 
 logger.info("Bot module loaded successfully")
-
-
