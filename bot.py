@@ -5,14 +5,14 @@ A professional webhook-based bot that saves content from Telegram messages.
 
 Features:
 - Supports PUBLIC channels/groups only (v3.0)
-- Handles Polls and Quizzes (v3.0.3 - Fix)
+- Handles Polls and Quizzes (v3.0.5 - Fallback, Cleaned)
 - Batch/Range post saving (v3.0 - Limit 100)
 - Batch cancellation feature (v3.0 - /cancel)
 - Robust error handling
 - Webhook deployment ready
 
 Author: Your Name
-Version: 3.0.3 (Public Only, Quiz/Poll Fix, Cancel, English UI, 100 Limit)
+Version: 3.0.5 (Public Only, Quiz/Poll Fallback, No Admin Commands)
 License: MIT
 """
 
@@ -39,14 +39,14 @@ class Config:
         BOT_TOKEN: Bot token from @BotFather
     
     Optional:
-        OWNER_ID: Telegram user ID for admin commands (can be None)
+        OWNER_ID: (No longer used in v3.0.5)
     """
     
     # Load environment variables
     API_ID: Optional[int] = None
     API_HASH: Optional[str] = None
     BOT_TOKEN: Optional[str] = None
-    OWNER_ID: Optional[int] = None
+    OWNER_ID: Optional[int] = None # This variable can remain but is unused
     
     @classmethod
     def load(cls) -> bool:
@@ -62,13 +62,12 @@ class Config:
             cls.API_HASH = os.environ.get("API_HASH")
             cls.BOT_TOKEN = os.environ.get("BOT_TOKEN")
             
-            # Optional variables
+            # Optional: Load OWNER_ID for compatibility, though it's not used
             owner_id_str = os.environ.get("OWNER_ID")
             if owner_id_str:
                 try:
                     cls.OWNER_ID = int(owner_id_str)
                 except (ValueError, TypeError):
-                    logging.warning("OWNER_ID not set or invalid. Admin commands will be disabled.")
                     cls.OWNER_ID = None
             
             # Validate required variables
@@ -124,18 +123,7 @@ ACTIVE_BATCHES: Dict[int, bool] = {}
 
 # ==================== HELPER FUNCTIONS ====================
 
-def is_owner(user_id: int) -> bool:
-    """
-    Check if a user is the bot owner.
-    
-    Args:
-        user_id: Telegram user ID to check
-        
-    Returns:
-        bool: True if user is owner, False otherwise
-    """
-    return Config.OWNER_ID is not None and user_id == Config.OWNER_ID
-
+# --- REMOVED: is_owner function is no longer needed ---
 
 # --- MODIFIED: Restricted to PUBLIC links ONLY. No private, no topics. ---
 def parse_telegram_link(link: str) -> Optional[Dict[str, Any]]:
@@ -210,6 +198,13 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
         Tuple of (success: bool, error: Optional[str])
     """
     try:
+        # --- MODIFIED v3.0.4: Skip Polls ---
+        # A Bot account cannot get correct_option_id from a channel poll.
+        # This will always fail. We must use copy_message as fallback.
+        if original_msg.poll:
+            return False, "Polls cannot be manually recreated by bots (API limitation)"
+        # --- END MODIFIED BLOCK ---
+        
         # Text message
         if original_msg.text:
             await client.send_message(
@@ -279,66 +274,6 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
                 parse_mode=ParseMode.HTML
             )
         
-        # --- MODIFIED: Handle Polls & Quizzes (v3.0.3 FIX) ---
-        elif original_msg.poll:
-            # Extract common poll options
-            poll_options = [opt.text for opt in original_msg.poll.options]
-
-            # --- FIX: Handle mutually exclusive open_period and close_date ---
-            poll_open_period = None
-            poll_close_date = None
-            
-            if original_msg.poll.open_period:
-                poll_open_period = original_msg.poll.open_period
-            elif original_msg.poll.close_date:
-                # --- v3.0.2 FIX: Check if the close_date is in the past ---
-                now_utc = datetime.now(timezone.utc)
-                if original_msg.poll.close_date > now_utc:
-                    poll_close_date = original_msg.poll.close_date
-            # --- END v3.0.2 FIX ---
-
-            # Check if it's a Quiz
-            if original_msg.poll.type == PollType.QUIZ:
-                await client.send_poll(
-                    chat_id=to_chat_id,
-                    question=original_msg.poll.question,
-                    options=poll_options,
-                    is_anonymous=original_msg.poll.is_anonymous,
-                    type="quiz",  # Explicitly set type as quiz
-                    correct_option_id=original_msg.poll.correct_option_id,
-                    
-                    # --- FIX v3.0.3: Use explanation string and entities ---
-                    explanation=original_msg.poll.explanation,
-                    explanation_entities=original_msg.poll.explanation_entities,
-                    # explanation_parse_mode=ParseMode.HTML, # <-- This was the bug
-                    # --- END FIX ---
-                    
-                    open_period=poll_open_period,
-                    close_date=poll_close_date
-                )
-            # Check if it's a Regular Poll
-            elif original_msg.poll.type == PollType.REGULAR:
-                await client.send_poll(
-                    chat_id=to_chat_id,
-                    question=original_msg.poll.question,
-                    options=poll_options,
-                    is_anonymous=original_msg.poll.is_anonymous,
-                    type="regular", # Explicitly set type as regular
-                    allows_multiple_answers=original_msg.poll.allows_multiple_answers,
-                    
-                    # --- FIX v3.0.3: Also apply to regular polls ---
-                    explanation=original_msg.poll.explanation,
-                    explanation_entities=original_msg.poll.explanation_entities,
-                    # --- END FIX ---
-
-                    open_period=poll_open_period, 
-                    close_date=poll_close_date
-                )
-            else:
-                # Fallback for any other unknown poll type
-                return False, f"Unsupported poll type: {original_msg.poll.type}"
-        # --- END MODIFIED BLOCK ---
-        
         # Unsupported type
         else:
             return False, "Unsupported message type"
@@ -386,25 +321,30 @@ async def copy_message_with_fallback(
         if not original_msg.text and not original_msg.caption and not original_msg.media and not original_msg.poll:
             return None, "Message is empty"
         
-        # Method 1: Try manual copy by type (now preserves formatting + polls)
-        success, error = await send_message_by_type(client, original_msg, to_chat_id)
-        if success:
-            logger.info(f"Successfully copied message {message_id} using manual method")
-            # We return the *original* message object as a success indicator
-            # The actual sent message isn't returned by send_message_by_type
-            # This is fine for the batch counter
-            return original_msg, None
-        
-        logger.warning(f"Manual copy failed for {message_id}. Falling back. Error: {error}")
-        
-        # Method 2: Try Pyrogram's copy_message
+        # --- MODIFIED v3.0.4: Skip manual copy for polls ---
+        # We know send_message_by_type will fail for polls due to API limits,
+        # so we skip it to go directly to copy_message.
+        if not original_msg.poll:
+            # Method 1: Try manual copy by type (for non-poll messages)
+            success, error = await send_message_by_type(client, original_msg, to_chat_id)
+            if success:
+                logger.info(f"Successfully copied message {message_id} using manual method")
+                return original_msg, None
+            
+            if error:
+                 logger.warning(f"Manual copy failed for {message_id}. Falling back. Error: {error}")
+
+        # Method 2: Try Pyrogram's copy_message (This will be the main method for polls)
         try:
             copied_msg = await client.copy_message(
                 chat_id=to_chat_id,
                 from_chat_id=from_chat_id,
                 message_id=message_id
             )
-            logger.info(f"Successfully copied message {message_id} using copy_message")
+            if original_msg.poll:
+                logger.info(f"Successfully copied poll {message_id} using copy_message (API fallback)")
+            else:
+                 logger.info(f"Successfully copied message {message_id} using copy_message")
             return copied_msg, None
         except Exception as copy_error:
             logger.warning(f"copy_message failed: {copy_error}")
@@ -484,7 +424,7 @@ if app:
         This command is accessible to all users.
         """
         welcome_text = (
-            "🤖 **Content Saver Bot** (v3.0.3)\n\n" # <-- Version updated
+            "🤖 **Content Saver Bot** (v3.0.5)\n\n" # <-- Version updated
             "📋 **How to use:**\n"
             "• Send any **public** Telegram message link\n"
             "• Bot will fetch and forward the content to you\n\n"
@@ -549,7 +489,8 @@ if app:
     
     
     # --- MODIFIED: Handles new restrictions, limit, and cancellation ---
-    @app.on_message(filters.text & ~filters.command(["start", "batch_download", "cancel", "status", "test", "debug"]) & filters.private & ~filters.me)
+    # --- REMOVED: "status", "test", "debug" from the filter ---
+    @app.on_message(filters.text & ~filters.command(["start", "batch_download", "cancel"]) & filters.private & ~filters.me)
     async def handle_message_link(client: Client, message: Message):
         """
         Handle incoming Telegram message links (single or batch).
@@ -678,154 +619,8 @@ if app:
         finally:
             # --- NEW: Clean up user from active batches dict ---
             ACTIVE_BATCHES.pop(user_id, None)
-    
-    
-    # --- UPDATED: Translated to English ---
-    @app.on_message(filters.command("status") & filters.private & ~filters.me)
-    async def status_command(client: Client, message: Message):
-        """
-        Check bot status and display information.
-        
-        This command is restricted to the bot owner.
-        """
-        # Check if user is owner
-        if not is_owner(message.from_user.id):
-            await message.reply("❌ This command is for the bot owner only.")
-            logger.warning(f"Unauthorized status command from user {message.from_user.id}")
-            return
-        
-        # Get bot information
-        me = await client.get_me()
-        
-        status_text = (
-            "🟢 **Bot Status: Online (Webhook Mode)**\n\n"
-            f"🆔 **Bot ID:** `{me.id}`\n"
-            f"👤 **Username:** @{me.username}\n"
-            f"📝 **First Name:** {me.first_name}\n"
-            f"🔧 **Pyrogram Version:** {client.pyro_version}\n"
-            f"👑 **Owner ID:** `{Config.OWNER_ID}`"
-        )
-        
-        await message.reply(status_text)
-        logger.info(f"Status command executed by owner {message.from_user.id}")
-    
-    
-    # --- UPDATED: Translated and modified for new link rules ---
-    @app.on_message(filters.command("test") & filters.private & ~filters.me)
-    async def test_link_parsing(client: Client, message: Message):
-        """
-        Test the link parsing functionality with sample links.
-        
-        This command is restricted to the bot owner.
-        """
-        if not is_owner(message.from_user.id):
-            await message.reply("❌ This command is for the bot owner only.")
-            return
-        
-        # Sample test links
-        test_links = [
-            # --- VALID LINKS ---
-            "https://t.me/mychannel/123",           # Public channel
-            "https://t.me/mychannel/123-125",           # Public channel batch
-            
-            # --- INVALID/RESTRICTED LINKS ---
-            "https://t.me/c/1234567890/123",         # Private channel
-            "https://t.me/freecoursebioc1/2/203",   # Public topic
-            "https://t.me/c/1234567890/123/456-457",    # Private topic batch
-            "https://t.me/freecoursebioc1/2/203-205",   # Public topic batch
-            "http://google.com"                         # Not a telegram link
-        ]
-        
-        result = "🧪 **Link Parsing Test Results:**\n\n"
-        
-        for link in test_links:
-            parsed = parse_telegram_link(link)
-            if parsed:
-                result += f"✅ **Parsed (Valid)**\n"
-                result += f"   `{link}`\n"
-                result += f"   **Type:** {parsed['type']}\n"
-                result += f"   **Msg Start:** {parsed['message_id_start']}\n"
-                result += f"   **Msg End:** {parsed['message_id_end']}\n\n"
-            else:
-                result += f"❌ **Not Parsed (Restricted/Invalid)**\n   `{link}`\n\n"
-        
-        await message.reply(result)
-        logger.info(f"Test command executed by owner {message.from_user.id}")
-    
-    
-    # --- UPDATED: Translated to English ---
-    @app.on_message(filters.command("debug") & filters.private & ~filters.me)
-    async def debug_message(client: Client, message: Message):
-        """
-        Debug a Telegram message link and show detailed information.
-        
-        Usage: /debug <telegram_link>
-        
-        This command is restricted to the bot owner.
-        """
-        if not is_owner(message.from_user.id):
-            await message.reply("❌ This command is for the bot owner only.")
-            return
-        
-        # Extract link from command
-        text = message.text.replace("/debug", "").strip()
-        
-        if not text:
-            await message.reply(
-                "**Usage:** `/debug <telegram_link>`\n\n"
-                "**Example:** `/debug https://t.me/channel/123`\n"
-                "**Or:** `/debug https://t.me/channel/123-125`"
-            )
-            return
-        
-        # Parse the link
-        parsed = parse_telegram_link(text)
-        
-        if not parsed:
-            await message.reply("❌ Invalid or Restricted link format")
-            return
-            
-        # --- MODIFIED: Use msg_start for debug ---
-        msg_id_to_debug = parsed["message_id_start"] # Just debug the first message in a range
-            
-        try:
-            # Determine chat ID
-            chat_id = parsed["channel"]
-            
-            # Fetch message details
-            original_msg = await client.get_messages(chat_id, msg_id_to_debug)
-            
-            if not original_msg:
-                await message.reply("❌ Message not found or bot doesn't have access")
-                return
-            
-            # Build debug information
-            debug_info = (
-                "🔍 **Link Debug Information**\n\n"
-                f"**Link Type:** {parsed['type']}\n"
-                f"**Chat ID:** `{chat_id}`\n"
-                f"**Msg Start:** `{parsed['message_id_start']}`\n"
-                f"**Msg End:** `{parsed['message_id_end']}`\n"
-            )
-            
-            debug_info += f"\n**Content Analysis (for Msg ID: {msg_id_to_debug}):**\n"
-            debug_info += f"• Has Text: {'✅' if original_msg.text else '❌'}\n"
-            debug_info += f"• Has Caption: {'✅' if original_msg.caption else '❌'}\n"
-            debug_info += f"• Has Media: {'✅' if original_msg.media else '❌'}\n"
-            debug_info += f"• Has Poll: {'✅' if original_msg.poll else '❌'}\n"
-            
-            if original_msg.media:
-                debug_info += f"• Media Type: {original_msg.media.value}\n"
-            if original_msg.poll:
-                debug_info += f"• Poll Type: {original_msg.poll.type.value}\n"
-                debug_info += f"• Is Quiz: {'✅' if original_msg.poll.type == PollType.QUIZ else '❌'}\n"
-            
-            await message.reply(debug_info)
-            logger.info(f"Debug command executed for link: {text}")
-        
-        except Exception as e:
-            await message.reply(f"❌ Debug error: {str(e)}")
-            logger.error(f"Debug command error: {e}", exc_info=True)
+
+    # --- REMOVED: status_command, test_link_parsing, and debug_message ---
 
 
 # ==================== MODULE EXPORTS ====================
@@ -834,4 +629,4 @@ if app:
 __all__ = ['app', 'BOT_TOKEN']
 BOT_TOKEN = Config.BOT_TOKEN
 
-logger.info("Bot module v3.0.3 (QuizFix) loaded successfully")
+logger.info("Bot module v3.0.5 (No Admin) loaded successfully")
