@@ -5,14 +5,14 @@ A professional webhook-based bot that saves content from Telegram messages.
 
 Features:
 - Supports PUBLIC channels/groups only (v3.0)
-- Handles Polls and Quizzes (v3.0)
+- Handles Polls and Quizzes (v3.0.1 - Fix)
 - Batch/Range post saving (v3.0 - Limit 100)
 - Batch cancellation feature (v3.0 - /cancel)
 - Robust error handling
 - Webhook deployment ready
 
 Author: Your Name
-Version: 3.0.0 (Public Only, Quiz/Poll, Cancel, English UI, 100 Limit)
+Version: 3.0.1 (Public Only, Quiz/Poll Fix, Cancel, English UI, 100 Limit)
 License: MIT
 """
 
@@ -23,7 +23,8 @@ import asyncio
 from typing import Optional, Tuple, Dict, Any
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from pyrogram.enums import ParseMode, PollType  # --- UPDATED: Added PollType ---
+from pyrogram.enums import ParseMode, PollType
+from pyrogram.errors import MessageNotModified
 
 # ==================== CONFIGURATION ====================
 
@@ -277,11 +278,23 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
                 parse_mode=ParseMode.HTML
             )
         
-        # --- NEW: Handle Polls & Quizzes ---
+        # --- MODIFIED: Handle Polls & Quizzes (v3.0.1 FIX) ---
         elif original_msg.poll:
             # Extract common poll options
             poll_options = [opt.text for opt in original_msg.poll.options]
+
+            # --- FIX: Handle mutually exclusive open_period and close_date ---
+            # The send_poll method cannot accept both parameters at the same time.
+            # We must prioritize one, just like the Telegram client does.
+            poll_open_period = None
+            poll_close_date = None
             
+            if original_msg.poll.open_period:
+                poll_open_period = original_msg.poll.open_period
+            elif original_msg.poll.close_date:
+                poll_close_date = original_msg.poll.close_date
+            # --- END FIX ---
+
             # Check if it's a Quiz
             if original_msg.poll.type == PollType.QUIZ:
                 await client.send_poll(
@@ -293,8 +306,8 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
                     correct_option_id=original_msg.poll.correct_option_id,
                     explanation=original_msg.poll.explanation.html if original_msg.poll.explanation else None,
                     explanation_parse_mode=ParseMode.HTML,
-                    open_period=original_msg.poll.open_period,
-                    close_date=original_msg.poll.close_date
+                    open_period=poll_open_period, # <-- MODIFIED
+                    close_date=poll_close_date  # <-- MODIFIED
                 )
             # Check if it's a Regular Poll
             elif original_msg.poll.type == PollType.REGULAR:
@@ -305,13 +318,13 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
                     is_anonymous=original_msg.poll.is_anonymous,
                     type="regular", # Explicitly set type as regular
                     allows_multiple_answers=original_msg.poll.allows_multiple_answers,
-                    open_period=original_msg.poll.open_period,
-                    close_date=original_msg.poll.close_date
+                    open_period=poll_open_period, # <-- MODIFIED
+                    close_date=poll_close_date  # <-- MODIFIED
                 )
             else:
                 # Fallback for any other unknown poll type
                 return False, f"Unsupported poll type: {original_msg.poll.type}"
-        # --- END NEW BLOCK ---
+        # --- END MODIFIED BLOCK ---
         
         # Unsupported type
         else:
@@ -364,7 +377,12 @@ async def copy_message_with_fallback(
         success, error = await send_message_by_type(client, original_msg, to_chat_id)
         if success:
             logger.info(f"Successfully copied message {message_id} using manual method")
+            # We return the *original* message object as a success indicator
+            # The actual sent message isn't returned by send_message_by_type
+            # This is fine for the batch counter
             return original_msg, None
+        
+        logger.warning(f"Manual copy failed for {message_id}. Falling back. Error: {error}")
         
         # Method 2: Try Pyrogram's copy_message
         try:
@@ -426,11 +444,17 @@ async def handle_copy_error(status_msg: Message, error: Exception) -> None:
     # Check for known error types
     for error_type, response in error_responses.items():
         if error_type in error_msg:
-            await status_msg.edit(response)
+            try:
+                await status_msg.edit(response)
+            except MessageNotModified:
+                pass # Ignore if message is already showing the error
             return
     
     # Generic error for unknown types
-    await status_msg.edit(f"❌ **An unexpected error occurred:**\n`{error_msg}`")
+    try:
+        await status_msg.edit(f"❌ **An unexpected error occurred:**\n`{error_msg}`")
+    except MessageNotModified:
+        pass
 
 
 # ==================== BOT COMMAND HANDLERS ====================
@@ -447,7 +471,7 @@ if app:
         This command is accessible to all users.
         """
         welcome_text = (
-            "🤖 **Content Saver Bot** (v3.0)\n\n"
+            "🤖 **Content Saver Bot** (v3.0.1)\n\n"
             "📋 **How to use:**\n"
             "• Send any **public** Telegram message link\n"
             "• Bot will fetch and forward the content to you\n\n"
@@ -797,5 +821,4 @@ if app:
 __all__ = ['app', 'BOT_TOKEN']
 BOT_TOKEN = Config.BOT_TOKEN
 
-logger.info("Bot module v3.0 loaded successfully")
-
+logger.info("Bot module v3.0.1 (QuizFix) loaded successfully")
