@@ -4,26 +4,26 @@ Telegram Content Saver Bot
 A professional webhook-based bot that saves content from Telegram messages.
 
 Features:
-- Supports public and private channels
-- Handles topic/forum messages
-- Multiple media types support
+- Supports PUBLIC channels/groups only (v3.0)
+- Handles Polls and Quizzes (v3.0)
+- Batch/Range post saving (v3.0 - Limit 100)
+- Batch cancellation feature (v3.0 - /cancel)
 - Robust error handling
 - Webhook deployment ready
-- --- NEW: Batch/Range post saving ---
 
 Author: Your Name
-Version: 2.3.0 (Fixed formatting loss & added /batch_download command)
+Version: 3.0.0 (Public Only, Quiz/Poll, Cancel, English UI, 100 Limit)
 License: MIT
 """
 
 import logging
 import os
 import re
-import asyncio  # --- NEW ---: Added for batch processing delay
+import asyncio
 from typing import Optional, Tuple, Dict, Any
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from pyrogram.enums import ParseMode  # --- UPDATED: Added for formatting fix ---
+from pyrogram.enums import ParseMode, PollType  # --- UPDATED: Added PollType ---
 
 # ==================== CONFIGURATION ====================
 
@@ -116,6 +116,9 @@ else:
     logger.error("Bot client not initialized due to invalid configuration")
     app = None
 
+# --- NEW: State tracking for /cancel command ---
+ACTIVE_BATCHES: Dict[int, bool] = {}
+
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -132,130 +135,63 @@ def is_owner(user_id: int) -> bool:
     return Config.OWNER_ID is not None and user_id == Config.OWNER_ID
 
 
-# --- MODIFIED: Updated parse_telegram_link to support ranges ---
+# --- MODIFIED: Restricted to PUBLIC links ONLY. No private, no topics. ---
 def parse_telegram_link(link: str) -> Optional[Dict[str, Any]]:
     """
     Parse Telegram message links and extract relevant information.
     
-    Supports single links and batch/range links (e.g., /100-110).
+    Supports ONLY public channels/groups (single and batch).
+    Blocks all private links (t.me/c/...) and all topic links.
     
     Args:
         link: Telegram message link
         
     Returns:
-        Dict with parsed information or None if link is invalid
+        Dict with parsed information or None if link is invalid/restricted
     """
     link = link.strip().replace(" ", "") # Remove spaces
     
-    # Define regex patterns for different link types
+    # Define regex patterns
     # Batch/range patterns MUST come before single patterns
     patterns = [
-        # --- NEW BATCH/RANGE PATTERNS ---
-        # Private topic batch: https://t.me/c/1234567890/123/456-460
-        (r"https?://t\.me/c/(\d+)/(\d+)/(\d+)-(\d+)$", "private_topic_batch"),
-        
-        # Public topic batch: https://t.me/channel/123/456-460
-        (r"https?://t\.me/([^/]+)/(\d+)/(\d+)-(\d+)$", "public_topic_batch"),
-        
-        # Private channel batch: https://t.me/c/1234567890/123-130
-        (r"https?://t\.me/c/(\d+)/(\d+)-(\d+)$", "private_batch"),
-        
         # Public channel batch: https://t.me/channel/123-130
         (r"https?://t\.me/([^/]+)/(\d+)-(\d+)$", "public_batch"),
         
-        # --- ORIGINAL SINGLE POST PATTERNS ---
-        # Private topic: https://t.me/c/1234567890/123/456
-        (r"https?://t\.me/c/(\d+)/(\d+)/(\d+)$", "private_topic"),
-        
-        # Private channel: https://t.me/c/1234567890/123
-        (r"https?://t\.me/c/(\d+)/(\d+)$", "private"),
-        
-        # Public topic: https://t.me/channel/123/456
-        (r"https://t\.me/([^/]+)/(\d+)/(\d+)$", "public_topic"),
-        
         # Public channel: https://t.me/channel/123
-        (r"https://t\.me/([^/]+)/(\d+)$", "public")
+        (r"https?://t\.me/([^/]+)/(\d+)$", "public")
+        
+        # --- All other types (private, topics) are intentionally removed ---
     ]
     
     for pattern, link_type in patterns:
         match = re.match(pattern, link)
         if match:
-            # --- HANDLE BATCH TYPES ---
-            if link_type == "public_topic_batch":
-                return {
-                    "type": "public_topic",
-                    "channel": match.group(1),
-                    "topic_id": int(match.group(2)),
-                    "message_id_start": int(match.group(3)),
-                    "message_id_end": int(match.group(4))
-                }
-            elif link_type == "private_topic_batch":
-                return {
-                    "type": "private_topic",
-                    "chat_id": int(f"-100{match.group(1)}"),
-                    "topic_id": int(match.group(2)),
-                    "message_id_start": int(match.group(3)),
-                    "message_id_end": int(match.group(4))
-                }
-            elif link_type == "private_batch":
-                return {
-                    "type": "private",
-                    "chat_id": int(f"-100{match.group(1)}"),
-                    "topic_id": None,
-                    "message_id_start": int(match.group(2)),
-                    "message_id_end": int(match.group(3))
-                }
-            elif link_type == "public_batch":
+            # --- Handle BATCH type ---
+            if link_type == "public_batch":
                 return {
                     "type": "public",
                     "channel": match.group(1),
-                    "topic_id": None,
+                    "topic_id": None, # Topics are not supported
                     "message_id_start": int(match.group(2)),
                     "message_id_end": int(match.group(3))
                 }
-                
-            # --- HANDLE ORIGINAL SINGLE TYPES (Modified for consistency) ---
-            elif link_type == "public_topic":
-                msg_id = int(match.group(3))
-                return {
-                    "type": "public_topic",
-                    "channel": match.group(1),
-                    "topic_id": int(match.group(2)),
-                    "message_id_start": msg_id,
-                    "message_id_end": msg_id  # Start and end are the same
-                }
-            elif link_type == "private_topic":
-                msg_id = int(match.group(3))
-                return {
-                    "type": "private_topic",
-                    "chat_id": int(f"-100{match.group(1)}"),
-                    "topic_id": int(match.group(2)),
-                    "message_id_start": msg_id,
-                    "message_id_end": msg_id
-                }
-            elif link_type == "private":
-                msg_id = int(match.group(2))
-                return {
-                    "type": "private",
-                    "chat_id": int(f"-100{match.group(1)}"),
-                    "topic_id": None,
-                    "message_id_start": msg_id,
-                    "message_id_end": msg_id
-                }
+            
+            # --- Handle SINGLE type ---
             elif link_type == "public":
                 msg_id = int(match.group(2))
                 return {
                     "type": "public",
                     "channel": match.group(1),
-                    "topic_id": None,
+                    "topic_id": None, # Topics are not supported
                     "message_id_start": msg_id,
-                    "message_id_end": msg_id
+                    "message_id_end": msg_id  # Start and end are the same
                 }
     
+    # If no pattern matches (e.g., private link, topic link, or invalid)
     return None
 
 
-# --- UPDATED: Function modified to preserve formatting ---
+# --- UPDATED: Added Poll/Quiz support ---
 async def send_message_by_type(client: Client, original_msg: Message, to_chat_id: int) -> Tuple[bool, Optional[str]]:
     """
     Send a message by determining its type and using the appropriate method.
@@ -341,6 +277,42 @@ async def send_message_by_type(client: Client, original_msg: Message, to_chat_id
                 parse_mode=ParseMode.HTML
             )
         
+        # --- NEW: Handle Polls & Quizzes ---
+        elif original_msg.poll:
+            # Extract common poll options
+            poll_options = [opt.text for opt in original_msg.poll.options]
+            
+            # Check if it's a Quiz
+            if original_msg.poll.type == PollType.QUIZ:
+                await client.send_poll(
+                    chat_id=to_chat_id,
+                    question=original_msg.poll.question,
+                    options=poll_options,
+                    is_anonymous=original_msg.poll.is_anonymous,
+                    type="quiz",  # Explicitly set type as quiz
+                    correct_option_id=original_msg.poll.correct_option_id,
+                    explanation=original_msg.poll.explanation.html if original_msg.poll.explanation else None,
+                    explanation_parse_mode=ParseMode.HTML,
+                    open_period=original_msg.poll.open_period,
+                    close_date=original_msg.poll.close_date
+                )
+            # Check if it's a Regular Poll
+            elif original_msg.poll.type == PollType.REGULAR:
+                await client.send_poll(
+                    chat_id=to_chat_id,
+                    question=original_msg.poll.question,
+                    options=poll_options,
+                    is_anonymous=original_msg.poll.is_anonymous,
+                    type="regular", # Explicitly set type as regular
+                    allows_multiple_answers=original_msg.poll.allows_multiple_answers,
+                    open_period=original_msg.poll.open_period,
+                    close_date=original_msg.poll.close_date
+                )
+            else:
+                # Fallback for any other unknown poll type
+                return False, f"Unsupported poll type: {original_msg.poll.type}"
+        # --- END NEW BLOCK ---
+        
         # Unsupported type
         else:
             return False, "Unsupported message type"
@@ -357,7 +329,7 @@ async def copy_message_with_fallback(
     from_chat_id: int,
     message_id: int,
     to_chat_id: int,
-    message_thread_id: Optional[int] = None # This parameter is kept as requested
+    message_thread_id: Optional[int] = None # This parameter is kept
 ) -> Tuple[Optional[Message], Optional[str]]:
     """
     Copy a message with multiple fallback methods.
@@ -372,7 +344,7 @@ async def copy_message_with_fallback(
         from_chat_id: Source chat/channel ID
         message_id: Message ID to copy
         to_chat_id: Destination chat ID
-        message_thread_id: Topic ID for forum messages (optional)
+        message_thread_id: Topic ID (not used in v3.0 but kept for compatibility)
         
     Returns:
         Tuple of (copied_message: Optional[Message], error: Optional[str])
@@ -385,10 +357,10 @@ async def copy_message_with_fallback(
             return None, "Message not found"
         
         # Check if message has any content
-        if not original_msg.text and not original_msg.caption and not original_msg.media:
+        if not original_msg.text and not original_msg.caption and not original_msg.media and not original_msg.poll:
             return None, "Message is empty"
         
-        # Method 1: Try manual copy by type (now preserves formatting)
+        # Method 1: Try manual copy by type (now preserves formatting + polls)
         success, error = await send_message_by_type(client, original_msg, to_chat_id)
         if success:
             logger.info(f"Successfully copied message {message_id} using manual method")
@@ -424,9 +396,10 @@ async def copy_message_with_fallback(
         return None, str(e)
 
 
+# --- UPDATED: All messages translated to English ---
 async def handle_copy_error(status_msg: Message, error: Exception) -> None:
     """
-    Handle and display user-friendly error messages.
+    Handle and display user-friendly error messages (in English).
     
     Args:
         status_msg: Status message to edit with error
@@ -441,13 +414,13 @@ async def handle_copy_error(status_msg: Message, error: Exception) -> None:
         
     # Map of error types to user-friendly messages
     error_responses = {
-        "CHAT_ADMIN_REQUIRED": "❌ Bot needs admin rights in the source channel.",
-        "USER_NOT_PARTICIPANT": "❌ Bot is not a member of the source channel.",
-        "MESSAGE_ID_INVALID": "❌ Message not found or invalid message ID.",
-        "CHANNEL_PRIVATE": "❌ Cannot access private channel. Bot needs to be added to the channel.",
-        "PEER_ID_INVALID": "❌ Invalid channel/chat ID. Make sure the link is correct.",
-        "FLOOD_WAIT": "❌ Rate limited by Telegram. Please try again later.",
-        "Message is empty": "❌ The message appears to be empty or has no content to copy.",
+        "CHAT_ADMIN_REQUIRED": "❌ **Error:** Bot needs admin rights in the source channel.",
+        "USER_NOT_PARTICIPANT": "❌ **Error:** Bot is not a member of the source channel. Please add it.",
+        "MESSAGE_ID_INVALID": "❌ **Error:** Message not found or invalid message ID.",
+        "CHANNEL_PRIVATE": "❌ **Error:** Cannot access private channel. This bot only supports public channels.",
+        "PEER_ID_INVALID": "❌ **Error:** Invalid channel/chat ID. Make sure the link is correct.",
+        "FLOOD_WAIT": "❌ **Error:** Rate limited by Telegram. Please try again later.",
+        "Message is empty": "❌ **Error:** The message appears to be empty or has no content to copy.",
     }
     
     # Check for known error types
@@ -457,7 +430,7 @@ async def handle_copy_error(status_msg: Message, error: Exception) -> None:
             return
     
     # Generic error for unknown types
-    await status_msg.edit(f"❌ Error: {error_msg}")
+    await status_msg.edit(f"❌ **An unexpected error occurred:**\n`{error_msg}`")
 
 
 # ==================== BOT COMMAND HANDLERS ====================
@@ -465,6 +438,7 @@ async def handle_copy_error(status_msg: Message, error: Exception) -> None:
 
 if app:
     
+    # --- UPDATED: Translated to English ---
     @app.on_message(filters.command("start") & filters.private & ~filters.me)
     async def start_command(client: Client, message: Message):
         """
@@ -473,15 +447,17 @@ if app:
         This command is accessible to all users.
         """
         welcome_text = (
-            "🤖 **Content Saver Bot**\n\n"
+            "🤖 **Content Saver Bot** (v3.0)\n\n"
             "📋 **How to use:**\n"
-            "• Send any Telegram message link\n"
-            "• Bot will fetch and forward the content to you\n"
-            "• Supports regular channels and topic/forum messages\n\n"
+            "• Send any **public** Telegram message link\n"
+            "• Bot will fetch and forward the content to you\n\n"
+            "⚠️ **Restrictions:**\n"
+            "• **Private** channels/groups are **not** supported.\n"
+            "• **Topic** links are **not** supported.\n\n"
             "**--- NEW: Batch Saving ---**\n"
             "Send links in `from-to` format:\n"
             "`https://t.me/channel/100-110`\n"
-            "(Maximum 25 posts at a time)\n\n"
+            "(Maximum **100** posts at a time)\n\n"
             "For more details, send /batch_download\n\n"
             "✅ **Ready to save content!**"
         )
@@ -489,7 +465,7 @@ if app:
         logger.info(f"User {message.from_user.id} started the bot")
     
     
-    # --- NEW: Added /batch_download command handler ---
+    # --- UPDATED: Translated to English ---
     @app.on_message(filters.command("batch_download") & filters.private & ~filters.me)
     async def batch_command(client: Client, message: Message):
         """
@@ -498,35 +474,58 @@ if app:
         This command is accessible to all users.
         """
         batch_help_text = (
-            "📤 **ব্যাচ সেভ (Batch Save) নির্দেশিকা**\n\n"
-            "একাধিক পোস্ট একসাথে সেভ করতে, লিঙ্কটি `from-to` ফরম্যাটে পাঠান।\n\n"
-            "**পাবলিক চ্যানেল/গ্রুপ:**\n"
+            "📤 **Batch Saving Guide**\n\n"
+            "To save multiple posts at once, send the link in a `from-to` format.\n\n"
+            "**Example (Public Channel):**\n"
             "`https://t.me/channel_username/1001-1010`\n\n"
-            "**প্রাইভেট চ্যানেল/গ্রুপ:**\n"
-            "`https://t.me/c/1234567890/101-120`\n\n"
-            "**টপিক সহ (পাবলিক):**\n"
-            "`https://t.me/channel_username/topic_id/50-60`\n\n"
-            "**টপিক সহ (প্রাইভেট):**\n"
-            "`https://t.me/c/123456789/topic_id/200-205`\n\n"
-            "ℹ️ **দ্রষ্টব্য:** রেঞ্জের মধ্যে স্পেস থাকলেও (`101 - 120`) এটি কাজ করবে। নিরাপত্তার জন্য সর্বোচ্চ **২৫টি** পোস্ট একসাথে প্রসেস করা যাবে।"
+            "ℹ️ **Notes:**\n"
+            "• Spaces in the range (`101 - 120`) will also work.\n"
+            "• The maximum allowed range is **100** posts at a time.\n"
+            "• Only public channels/groups are supported.\n\n"
+            "To stop a batch process, send /cancel"
         )
         await message.reply(batch_help_text)
         logger.info(f"User {message.from_user.id} requested batch help")
     
     
-    # --- MODIFIED: Rewritten to handle single and batch links ---
-    @app.on_message(filters.text & ~filters.command(["start", "batch_download", "status", "test", "debug"]) & filters.private & ~filters.me)
+    # --- NEW: /cancel command handler ---
+    @app.on_message(filters.command("cancel") & filters.private & ~filters.me)
+    async def cancel_command(client: Client, message: Message):
+        """
+        Handle /cancel command - Stops an active batch process for the user.
+        
+        This command is accessible to all users.
+        """
+        user_id = message.from_user.id
+        if ACTIVE_BATCHES.get(user_id) is False:
+            # The flag is False, meaning a batch is running but not yet cancelled
+            ACTIVE_BATCHES[user_id] = True # Set flag to True
+            await message.reply("Requesting cancellation... The batch will stop shortly.")
+            logger.info(f"User {user_id} requested batch cancellation")
+        elif ACTIVE_BATCHES.get(user_id) is True:
+            # Flag is already True, cancellation is in progress
+            await message.reply("Cancellation is already in progress...")
+        else:
+            # User is not in the dict, no batch is running
+            await message.reply("You have no active batch operation to cancel.")
+            logger.warning(f"User {user_id} tried to cancel with no active batch")
+    
+    
+    # --- MODIFIED: Handles new restrictions, limit, and cancellation ---
+    @app.on_message(filters.text & ~filters.command(["start", "batch_download", "cancel", "status", "test", "debug"]) & filters.private & ~filters.me)
     async def handle_message_link(client: Client, message: Message):
         """
         Handle incoming Telegram message links (single or batch).
         
         This is the main functionality of the bot. It:
         1. Validates the message contains a Telegram link
-        2. Parses the link (e.g., /100 or /100-110)
+        2. Parses the link (blocks private/topics)
         3. Loops through the range and copies messages
         4. Provides a final report
+        5. Listens for /cancel
         """
         text = message.text
+        user_id = message.from_user.id
         
         # Check if message contains a Telegram link
         if not any(domain in text for domain in ['t.me/', 'telegram.me/']):
@@ -542,7 +541,7 @@ if app:
             return
         
         telegram_link = link_match.group()
-        logger.info(f"Processing link from user {message.from_user.id}: {telegram_link}")
+        logger.info(f"Processing link from user {user_id}: {telegram_link}")
         
         # Send processing status
         status_msg = await message.reply("🔄 Processing your request...")
@@ -551,50 +550,60 @@ if app:
             # Parse the Telegram link
             parsed_link = parse_telegram_link(telegram_link)
             
+            # --- UPDATED: New error message for restricted links ---
             if not parsed_link:
-                await status_msg.edit("❌ Invalid Telegram link format. Please check the link and try again.")
+                await status_msg.edit(
+                    "❌ **Invalid Link Format**\n\n"
+                    "I can only process links from **public** channels or groups.\n\n"
+                    "**Private links** (`t.me/c/...`) and **Topic links** are **not** supported."
+                )
                 return
             
-            link_type = parsed_link["type"]
             msg_start = parsed_link["message_id_start"]
             msg_end = parsed_link["message_id_end"]
             
             # --- BATCH/RANGE CHECKS ---
-            BATCH_LIMIT = 25  # Set a reasonable limit
+            BATCH_LIMIT = 100  # --- UPDATED: Limit set to 100 ---
             
             if msg_start > msg_end:
-                await status_msg.edit("❌ Error: 'From' ID must be smaller than 'To' ID.")
+                await status_msg.edit("❌ **Error:** 'From' ID must be smaller than 'To' ID.")
                 return
             
             num_messages = (msg_end - msg_start) + 1
             if num_messages > BATCH_LIMIT:
-                await status_msg.edit(f"❌ Error: Range too large. Max **{BATCH_LIMIT}** posts at a time. You requested {num_messages}.")
+                await status_msg.edit(f"❌ **Error:** Range too large. Max **{BATCH_LIMIT}** posts at a time. You requested {num_messages}.")
                 return
             
-            # Determine chat ID based on link type
-            if link_type in ["public_topic", "public"]:
-                chat_id = parsed_link["channel"]
-            else:
-                chat_id = parsed_link["chat_id"]
-            
-            # Extract topic ID if present
-            topic_id = parsed_link.get("topic_id")
+            # Determine chat ID (will always be public username)
+            chat_id = parsed_link["channel"]
+            topic_id = None # Topics are not supported
             
             # --- PROCESS THE BATCH (even if it's just 1) ---
             success_count = 0
             fail_count = 0
             last_error = None
             
+            # --- NEW: Setup for /cancel ---
+            ACTIVE_BATCHES[user_id] = False # Set flag to False (running)
+            
             if num_messages > 1:
-                await status_msg.edit(f"🔄 Processing {num_messages} messages...")
+                await status_msg.edit(f"🔄 Processing {num_messages} messages... (Send /cancel to stop)")
 
             for msg_id in range(msg_start, msg_end + 1):
+                
+                # --- NEW: Check for cancellation flag ---
+                if ACTIVE_BATCHES.get(user_id, False):
+                    logger.info(f"Batch cancelled by user {user_id} at msg {msg_id}")
+                    await status_msg.edit("🛑 **Batch operation cancelled by user.**")
+                    fail_count = (msg_end + 1) - msg_id # Count remaining as "failed"
+                    break # Exit the loop
+                
                 copied_msg, error = await copy_message_with_fallback(
                     client=client,
                     from_chat_id=chat_id,
                     message_id=msg_id,
                     to_chat_id=message.chat.id,
-                    message_thread_id=topic_id # Passing this parameter as requested
+                    message_thread_id=topic_id # Passing None
                 )
                 
                 if error:
@@ -603,23 +612,21 @@ if app:
                     logger.warning(f"Failed to copy message {msg_id}: {error}")
                 else:
                     success_count += 1
-                    logger.info(f"Successfully copied message {msg_id} for user {message.from_user.id}")
+                    logger.info(f"Successfully copied message {msg_id} for user {user_id}")
                 
                 # Add a small delay to prevent flood waits
                 if num_messages > 1:
                     await asyncio.sleep(0.5) 
             
-            # --- FINAL REPORT ---
-            if num_messages == 1:
+            # --- FINAL REPORT (Translated) ---
+            if num_messages == 1 and not ACTIVE_BATCHES.get(user_id, False):
                 if success_count == 1:
                     success_msg = "✅ Content saved successfully!"
-                    if topic_id:
-                        success_msg += f" (from topic {topic_id})"
                     await status_msg.edit(success_msg)
                 else:
                     # Show the specific error for the single failed message
                     await handle_copy_error(status_msg, Exception(last_error))
-            else:
+            elif not ACTIVE_BATCHES.get(user_id, False):
                 # Batch summary
                 await status_msg.edit(
                     f"✅ **Batch Complete**\n\n"
@@ -628,10 +635,15 @@ if app:
                 )
         
         except Exception as e:
-            await handle_copy_error(status_msg, e) # Use our handler to check for non-critical errors
+            await handle_copy_error(status_msg, e) # Use our handler
             logger.error(f"Unexpected error processing link: {e}", exc_info=True)
+        
+        finally:
+            # --- NEW: Clean up user from active batches dict ---
+            ACTIVE_BATCHES.pop(user_id, None)
     
     
+    # --- UPDATED: Translated to English ---
     @app.on_message(filters.command("status") & filters.private & ~filters.me)
     async def status_command(client: Client, message: Message):
         """
@@ -661,6 +673,7 @@ if app:
         logger.info(f"Status command executed by owner {message.from_user.id}")
     
     
+    # --- UPDATED: Translated and modified for new link rules ---
     @app.on_message(filters.command("test") & filters.private & ~filters.me)
     async def test_link_parsing(client: Client, message: Message):
         """
@@ -674,16 +687,16 @@ if app:
         
         # Sample test links
         test_links = [
-            # --- NEW BATCH LINKS ---
-            "https://t.me/freecoursebioc1/2/203-205",   # Public topic batch
-            "https://t.me/c/1234567890/123/456-457",    # Private topic batch
-            "https://t.me/mychannel/123-125",           # Public channel batch
-            "https://t.me/c/1234567890/123-124",         # Private channel batch
-            
-            # --- ORIGINAL SINGLE LINKS ---
+            # --- VALID LINKS ---
             "https://t.me/mychannel/123",           # Public channel
+            "https://t.me/mychannel/123-125",           # Public channel batch
+            
+            # --- INVALID/RESTRICTED LINKS ---
             "https://t.me/c/1234567890/123",         # Private channel
             "https://t.me/freecoursebioc1/2/203",   # Public topic
+            "https://t.me/c/1234567890/123/456-457",    # Private topic batch
+            "https://t.me/freecoursebioc1/2/203-205",   # Public topic batch
+            "http://google.com"                         # Not a telegram link
         ]
         
         result = "🧪 **Link Parsing Test Results:**\n\n"
@@ -691,20 +704,19 @@ if app:
         for link in test_links:
             parsed = parse_telegram_link(link)
             if parsed:
-                result += f"✅ Link parsed successfully\n"
+                result += f"✅ **Parsed (Valid)**\n"
                 result += f"   `{link}`\n"
                 result += f"   **Type:** {parsed['type']}\n"
-                if 'topic_id' in parsed and parsed['topic_id']:
-                    result += f"   **Topic ID:** {parsed['topic_id']}\n"
                 result += f"   **Msg Start:** {parsed['message_id_start']}\n"
                 result += f"   **Msg End:** {parsed['message_id_end']}\n\n"
             else:
-                result += f"❌ Failed to parse\n   `{link}`\n\n"
+                result += f"❌ **Not Parsed (Restricted/Invalid)**\n   `{link}`\n\n"
         
         await message.reply(result)
         logger.info(f"Test command executed by owner {message.from_user.id}")
     
     
+    # --- UPDATED: Translated to English ---
     @app.on_message(filters.command("debug") & filters.private & ~filters.me)
     async def debug_message(client: Client, message: Message):
         """
@@ -733,7 +745,7 @@ if app:
         parsed = parse_telegram_link(text)
         
         if not parsed:
-            await message.reply("❌ Invalid link format")
+            await message.reply("❌ Invalid or Restricted link format")
             return
             
         # --- MODIFIED: Use msg_start for debug ---
@@ -741,10 +753,7 @@ if app:
             
         try:
             # Determine chat ID
-            if parsed["type"] in ["public_topic", "public"]:
-                chat_id = parsed["channel"]
-            else:
-                chat_id = parsed["chat_id"]
+            chat_id = parsed["channel"]
             
             # Fetch message details
             original_msg = await client.get_messages(chat_id, msg_id_to_debug)
@@ -762,16 +771,17 @@ if app:
                 f"**Msg End:** `{parsed['message_id_end']}`\n"
             )
             
-            if 'topic_id' in parsed and parsed['topic_id']:
-                debug_info += f"**Topic ID:** `{parsed['topic_id']}`\n"
-            
             debug_info += f"\n**Content Analysis (for Msg ID: {msg_id_to_debug}):**\n"
             debug_info += f"• Has Text: {'✅' if original_msg.text else '❌'}\n"
             debug_info += f"• Has Caption: {'✅' if original_msg.caption else '❌'}\n"
             debug_info += f"• Has Media: {'✅' if original_msg.media else '❌'}\n"
+            debug_info += f"• Has Poll: {'✅' if original_msg.poll else '❌'}\n"
             
             if original_msg.media:
                 debug_info += f"• Media Type: {original_msg.media.value}\n"
+            if original_msg.poll:
+                debug_info += f"• Poll Type: {original_msg.poll.type.value}\n"
+                debug_info += f"• Is Quiz: {'✅' if original_msg.poll.type == PollType.QUIZ else '❌'}\n"
             
             await message.reply(debug_info)
             logger.info(f"Debug command executed for link: {text}")
@@ -787,4 +797,5 @@ if app:
 __all__ = ['app', 'BOT_TOKEN']
 BOT_TOKEN = Config.BOT_TOKEN
 
-logger.info("Bot module loaded successfully")
+logger.info("Bot module v3.0 loaded successfully")
+
