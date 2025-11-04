@@ -18,7 +18,7 @@ Features:
 - Admin-only commands restricted to OWNER_ID.
 
 Author: Your Name
-Version: 3.1.0 (Public Only, Quiz/Poll Fallback, Admin Panel)
+Version: 3.1.1 (SyntaxError Fix)
 License: MIT
 """
 
@@ -165,7 +165,9 @@ async def add_or_update_user(user, is_start=False):
                 user_data['is_banned'] = False # Backfill missing field
             
             user_ref.update(user_data)
-            logger.info(f"User {user.id} ({user.first_name}) updated.")
+            # Log only on start, not every message
+            if is_start:
+                logger.info(f"User {user.id} ({user.first_name}) updated (re-started).")
             return user_doc.to_dict() # Return existing data
 
     except Exception as e:
@@ -218,10 +220,12 @@ async def get_all_users_from_db():
         return []
     try:
         users_stream = db.collection('users').stream()
-        users_list = [doc.to_dict() for doc in users_stream]
+        users_list = []
         # Add user_id to the dict as it's the document ID
-        for i, doc in enumerate(db.collection('users').stream()):
-            users_list[i]['user_id'] = doc.id
+        for doc in users_stream:
+            user_data = doc.to_dict()
+            user_data['user_id'] = doc.id
+            users_list.append(user_data)
         return users_list
     except Exception as e:
         logger.error(f"Failed to get all users: {e}")
@@ -265,10 +269,6 @@ def is_owner(user_id: int) -> bool:
 
 # --- All existing helper functions (parse_telegram_link, send_message_by_type, etc.)
 # --- are kept exactly as they were. ---
-
-# ... (parse_telegram_link, send_message_by_type, copy_message_with_fallback, handle_copy_error) ...
-# ... (আপনার আগের সব হেল্পার ফাংশন এখানে অপরিবর্তিত থাকবে) ...
-# ... (আমি শুধু নিচে ফাংশনগুলো কপি-পেস্ট করছি, কোনো পরিবর্তন করিনি) ...
 
 def parse_telegram_link(link: str) -> Optional[Dict[str, Any]]:
     link = link.strip().replace(" ", "") # Remove spaces
@@ -440,7 +440,7 @@ if app:
         
         # (Your existing welcome text)
         welcome_text = (
-            "🤖 **Content Saver Bot** (v3.1.0)\n\n" # <-- Version updated
+            "🤖 **Content Saver Bot** (v3.1.1)\n\n" # <-- Version updated
             "📋 **How to use:**\n"
             "• Send any **public** Telegram message link\n"
             "• Bot will fetch and forward the content to you\n\n"
@@ -455,7 +455,7 @@ if app:
             "✅ **Ready to save content!**"
         )
         await message.reply(welcome_text)
-        logger.info(f"User {user.id} started the bot")
+        # Logger info is now inside add_or_update_user()
     
     
     # --- MODIFIED: /batch_download command ---
@@ -634,7 +634,12 @@ if app:
                 # Create a text file in memory
                 output = "USER_ID,FIRST_NAME,USERNAME,IS_BANNED\n"
                 for user in users_list:
-                    output += f"{user.get('user_id', 'N/A')},{user.get('first_name', 'N/A')},{user.get('username', 'N/A')},{user.get('is_banned', 'N/A')}\n"
+                    # Format data for CSV
+                    user_id = user.get('user_id', 'N/A')
+                    first_name = str(user.get('first_name', 'N/A')).replace(',', '') # Remove commas
+                    username = str(user.get('username', 'N/A')).replace(',', '')
+                    is_banned = user.get('is_banned', 'N/A')
+                    output += f"{user_id},{first_name},{username},{is_banned}\n"
                 
                 # Send the file
                 with io.BytesIO(output.encode('utf-8')) as f:
@@ -675,10 +680,10 @@ if app:
         user = message.from_user
         
         # --- NEW: Add/Update user and check ban status ---
-        user_data = await add_or_update_user(user)
+        user_data = await add_or_update_user(user, is_start=False) # is_start=False
         if user_data and user_data.get('is_banned', False):
-            await message.reply("❌ আপনি এই বটটি ব্যবহার করা থেকে নিষিদ্ধ (banned)।")
-            logger.warning(f"Banned user {user.id} tried to send a link.")
+            # Do not reply, just log and ignore
+            logger.warning(f"Banned user {user.id} tried to send a link. Ignoring.")
             return
 
         # (Your existing link processing logic)
@@ -770,10 +775,12 @@ if app:
                 else:
                     await handle_copy_error(status_msg, Exception(last_error))
             elif not ACTIVE_BATCHES.get(user.id, False):
+                # Batch summary
+                # --- THIS IS THE FIX ---
                 await status_msg.edit(
                     f"✅ **Batch Complete**\n\n"
                     f"• Successfully saved: {success_count}\n"
-                    f• Failed to save: {fail_count}"
+                    f"• Failed to save: {fail_count}" # <-- FIX: Removed the typo 'f•' and made it a valid string
                 )
         
         except Exception as e:
@@ -790,5 +797,5 @@ if app:
 __all__ = ['app', 'BOT_TOKEN']
 BOT_TOKEN = Config.BOT_TOKEN
 
-logger.info("Bot module v3.1.0 (Admin+Firebase) loaded successfully")
+logger.info("Bot module v3.1.1 (Admin+Firebase+Fix) loaded successfully")
 
